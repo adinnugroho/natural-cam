@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.adin.naturalcam.image.ToneAndFilterTest" tests="16" skipped="0" failures="0" errors="0" timestamp="2026-10-03T03:40:03.937Z" hostname="DESKTOP-5NKLUF6" time="0.071">
+  <properties/>
+  <testcase name="filters are exact identity at zero strength" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.007"/>
+  <testcase name="exposure applies stops in linear light" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.004"/>
+  <testcase name="auto white balance fallback neutralizes balanced scene means" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.003"/>
+  <testcase name="highlight roll off is monotonic continuous and softer than clipping" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.012"/>
+  <testcase name="clipped near-white highlight becomes neutral without desaturating colored highlight" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.001"/>
+  <testcase name="tone mapping is monotonic and preserves zero" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.002"/>
+  <testcase name="output transformer never emits nan pixels" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.002"/>
+  <testcase name="sharpener amount is clamped and output stays finite" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.005"/>
+  <testcase name="tone map of neutral image stays neutral" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.002"/>
+  <testcase name="highlight roll off with zero compression is identity" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.001"/>
+  <testcase name="output transformer encodes srgb and packs argb" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.001"/>
+  <testcase name="natural tone keeps black and deepens shadows" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.0"/>
+  <testcase name="chroma denoise reduces color noise while preserving luminance grain" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.019"/>
+  <testcase name="natural tone and highlight rolloff preserve chromaticity" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.002"/>
+  <testcase name="gamut mapper clamps to unit interval" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.002"/>
+  <testcase name="denoise keeps output inside input range" classname="com.adin.naturalcam.image.ToneAndFilterTest" time="0.004"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

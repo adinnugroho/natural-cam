@@ -1,0 +1,20 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.adin.naturalcam.app-mergeDebugResources-49:/values-watch-v20/values-watch-v20.xml",
+            "map": [
+                {
+                    "source": "C:\\Users\\ADIN\\.gradle\\caches\\8.14.5\\transforms\\7f79f575372d2587e972d6b9b935f8c7\\transformed\\appcompat-1.1.0\\res\\values-watch-v20\\values-watch-v20.xml",
+                    "from": {
+                        "startLines": "2,5,8",
+                        "startColumns": "4,4,4",
+                        "startOffsets": "55,214,385",
+                        "endLines": "4,7,10",
+                        "endColumns": "12,12,12",
+                        "endOffsets": "209,380,553"
+                    }
+                }
+            ]
+        }
+    ]
+}
