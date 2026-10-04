@@ -94,6 +94,10 @@ data class PhotoCaptureRequest(
     val exposureMode: ExposureMode,
     val focusMode: FocusMode,
     val flashMode: FlashMode,
+    /** Normalized NATURAL white-balance temperature adjustment in [-1, 1]. */
+    val temperature: Float = 0f,
+    /** Selected creative style; consumed by NATURAL only (STYLE_PLAN 27/28). */
+    val style: StyleState = StyleState(),
     val outputSettings: OutputSettings,
 )
 

@@ -10,6 +10,7 @@ import com.adin.naturalcam.domain.LensOption
 import com.adin.naturalcam.domain.ProcessingProfile
 import com.adin.naturalcam.domain.RawMode
 import com.adin.naturalcam.domain.SavedPhoto
+import com.adin.naturalcam.domain.StyleState
 
 /** Immutable explicit UI state (AGENTS 39). */
 data class CameraUiState(
@@ -22,10 +23,12 @@ data class CameraUiState(
     val rawMode: RawMode = RawMode.FINAL_ONLY,
     val flashMode: FlashMode = FlashMode.OFF,
     val exposureCompensationEv: Float = 0f,
+    val temperature: Float = 0f,
     val aspectRatio: AspectRatio = AspectRatio.RATIO_4_3,
     val highestResolution: Boolean = false,
     val timerSeconds: Int = 0,
     val gridEnabled: Boolean = false,
+    val style: StyleState = StyleState(),
     val lastCapture: SavedPhoto? = null,
     val isShutterEnabled: Boolean = true,
     val notice: UiNotice? = null,
@@ -43,14 +46,16 @@ interface CameraActions {
     fun onSelectProfile(profile: ProcessingProfile)
     fun onSetFlash(mode: FlashMode)
     fun onSetExposureCompensation(ev: Float)
+    fun onSetTemperature(temperature: Float)
+    fun onSetStyle(style: StyleState)
     fun onSetRawMode(rawMode: RawMode)
+    fun onSelectStylePreset(style: StyleState)
     fun onCycleTimer()
     fun onSetAspectRatio(aspectRatio: AspectRatio)
     fun onSetHighestResolution(enabled: Boolean)
     fun onToggleGrid()
     /** xFraction/yFraction in view space [0,1]; ViewModel maps to metering points (SPEC 60). */
     fun onTapToFocus(xFraction: Float, yFraction: Float)
-    /** Locks AF/AE at the current focus box location. */
     fun onLockFocus(xFraction: Float, yFraction: Float)
     /** Continuous pinch zoom within the current lens (0 = reset to 1×). */
     fun onPinchZoom(zoomRatio: Float)

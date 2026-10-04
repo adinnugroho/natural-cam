@@ -16,4 +16,8 @@ data class AppSettings(
     val timerSeconds: Int = 0,
     val geotagging: Boolean = false,
     val gridEnabled: Boolean = false,
+    /** Normalized white-balance temperature adjustment in [-1, 1]. */
+    val temperature: Float = 0f,
+    /** Creative style state (STYLE_PLAN 13). */
+    val style: StyleState = StyleState(),
 )

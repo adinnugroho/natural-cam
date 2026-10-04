@@ -127,7 +127,7 @@ class CaptureCoordinator(
         frames: CapturedFrames,
     ): PhotoCaptureResult {
         val metadata = withLocation(frames.metadata, request.outputSettings.locationTagging)
-        val config = ProcessingConfiguration.forProfile(request.profile, request.outputSettings.jpegQuality)
+        val config = ProcessingConfiguration.forProfile(request.profile, request.outputSettings.jpegQuality, request.temperature, request.style)
         val limitations = plan.limitations
         // Developed JPEGs are physically rotated and HAL JPEGs arrive rotated by
         // the platform, so EXIF orientation is normal for every final JPEG (SPEC 89).

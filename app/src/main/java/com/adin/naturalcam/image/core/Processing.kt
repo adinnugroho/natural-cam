@@ -1,6 +1,7 @@
 package com.adin.naturalcam.image.core
 
 import com.adin.naturalcam.domain.ProcessingProfile
+import com.adin.naturalcam.domain.StyleState
 
 /** Mild chroma-only cleanup; luminance grain remains untouched. */
 internal const val NATURAL_CHROMA_DENOISE_STRENGTH = 0.18f
@@ -11,40 +12,51 @@ internal const val NATURAL_CHROMA_DENOISE_STRENGTH = 0.18f
  * until real-device evaluation (AGENTS 63) — see LIMITATIONS.md.
  */
 data class ToneConfig(
-    /** Exposure offset in stops applied in linear light. */
-    val exposureStops: Float = 0f,
-    /** Above-unity toe exponent deepens NATURAL shadows instead of lifting the black floor. */
-    val midtoneGamma: Float = 1.06f,
-    /** Slightly stronger global contrast keeps the scene from looking faded. */
-    val contrast: Float = 0.04f,
+    /** Moderate NATURAL lift in linear light requested for brighter final images. */
+    val exposureStops: Float = 0.30f,
+    /** Above-unity toe exponent keeps shadows deeper while the lift restores overall brightness. */
+    val midtoneGamma: Float = 1.04f,
+    /** Slightly stronger global contrast keeps the lifted image from looking faded. */
+    val contrast: Float = 0.05f,
     /** Linear level where highlight shoulder starts. */
     val highlightRollOffStart: Float = 0.75f,
     /** Minimal shoulder preserves highlight contrast without a washed/faded look. */
     val highlightCompression: Float = 0.03f,
     /** Very small NATURAL-only red/blue balance toward warmth; zero keeps neutral rendering. */
     val warmth: Float = 0.01f,
+    /** User temperature adjustment; negative cools, positive warms, normalized [-1, 1]. */
+    val temperature: Float = 0f,
 )
 
 data class ProcessingConfiguration(
     val profile: ProcessingProfile,
     val pipelineVersion: String,
     val tone: ToneConfig = ToneConfig(),
-    /** NATURAL-v10 preserves luminance grain; only chroma denoise is enabled. */
+    /** Creative style state applied after NATURAL base processing (STYLE_PLAN 15). */
+    val style: StyleState = StyleState(),
+    /** NATURAL-v13 preserves luminance grain; only chroma denoise is enabled. */
     val chromaDenoiseStrength: Float = 0f,
     val lumaDenoiseStrength: Float = 0f,
-    /** NATURAL-v10 avoids full-frame unsharp masking on the capture path. */
+    /** NATURAL-v13 avoids full-frame unsharp masking on the capture path. */
     val sharpenAmount: Float = 0f,
     val sharpenRadiusPx: Float = 1.0f,
     val jpegQuality: Int = 92,
 ) {
     companion object {
-        const val PIPELINE_VERSION = "natural-v10"
+        const val PIPELINE_VERSION = "natural-v15"
 
-        fun forProfile(profile: ProcessingProfile, jpegQuality: Int = 92): ProcessingConfiguration =
+        fun forProfile(
+            profile: ProcessingProfile,
+            jpegQuality: Int = 92,
+            temperature: Float = 0f,
+            style: StyleState = StyleState(),
+        ): ProcessingConfiguration =
             when (profile) {
                 ProcessingProfile.NATURAL -> ProcessingConfiguration(
                     profile = profile,
                     pipelineVersion = PIPELINE_VERSION,
+                    tone = ToneConfig(temperature = temperature.coerceIn(-1f, 1f)),
+                    style = style,
                     jpegQuality = jpegQuality,
                     chromaDenoiseStrength = NATURAL_CHROMA_DENOISE_STRENGTH,
                 )

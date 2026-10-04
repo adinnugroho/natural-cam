@@ -136,6 +136,8 @@ private fun CameraApp(viewModel: CameraViewModel) {
                     override fun onOpenDeviceInfo() { navController.navigate(ROUTE_DEVICE_INFO) }
                     override fun onLockFocus(xFraction: Float, yFraction: Float) =
                         viewModel.onLockFocus(xFraction, yFraction)
+                    override fun onSelectStylePreset(style: com.adin.naturalcam.domain.StyleState) =
+                        viewModel.onSelectStylePreset(style)
                 },
                 onPreviewViewCreated = viewModel::onPreviewView,
             )

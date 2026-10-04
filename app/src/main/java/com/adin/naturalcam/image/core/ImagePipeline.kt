@@ -15,6 +15,7 @@ import com.adin.naturalcam.image.processing.WhiteBalanceStage
 import com.adin.naturalcam.image.raw.ColorMatrixFactory
 import com.adin.naturalcam.image.raw.Demosaicer
 import com.adin.naturalcam.image.raw.RawNormalizer
+import com.adin.naturalcam.image.style.StyleEngine
 import com.adin.naturalcam.image.yuv.YuvToRgbConverter
 
 /**
@@ -30,7 +31,7 @@ interface ImagePipeline {
 }
 
 /**
- * Reference CPU pipeline, natural-v10 (SPEC 130):
+ * Reference CPU pipeline, natural-v13 (SPEC 130):
  * normalize → metadata WB → calibration-selected color transform → residual
  * neutral correction → clipped-highlight neutralization → exposure → hue-
  * preserving tone/roll-off → chroma denoise → gamut → sRGB → encode.
@@ -82,13 +83,14 @@ class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
     private fun finish(rgb: RgbImage, config: ProcessingConfiguration, orientationDegrees: Int): EncodedImage {
         var out = rgb
         if (config.profile == ProcessingProfile.NATURAL) {
-            val warmth = config.tone.warmth.coerceIn(0f, 0.1f)
+            val warmth = (config.tone.warmth + config.tone.temperature * 0.08f).coerceIn(-0.1f, 0.1f)
             out = WhiteBalanceStage.apply(out, RgbGains(1f + warmth, 1f, 1f - warmth))
             out = ExposureProcessor.apply(out, config.tone.exposureStops)
             out = NaturalToneMapper.map(out, config.tone)
             out = HighlightRollOff.apply(out, config.tone.highlightRollOffStart, config.tone.highlightCompression)
             out = NoiseReducer.reduce(out, config.chromaDenoiseStrength, config.lumaDenoiseStrength)
             out = Sharpener.sharpen(out, config.sharpenAmount, config.sharpenRadiusPx)
+            out = StyleEngine.apply(out, config.style)
         }
         // PURE and SYSTEM: only what makes the image viewable (SPEC 131).
         out = GamutMapper.clampToSrgbGamut(out)

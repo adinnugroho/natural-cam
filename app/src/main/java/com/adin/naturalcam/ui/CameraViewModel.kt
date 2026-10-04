@@ -23,6 +23,7 @@ import com.adin.naturalcam.domain.OutputSettings
 import com.adin.naturalcam.domain.PhotoCaptureRequest
 import com.adin.naturalcam.domain.ProcessingProfile
 import com.adin.naturalcam.domain.RawMode
+import com.adin.naturalcam.domain.StyleState
 import com.adin.naturalcam.settings.SettingsRepository
 import com.adin.naturalcam.storage.LatestPhotoReader
 import com.adin.naturalcam.camera.CameraException
@@ -97,8 +98,10 @@ class CameraViewModel(
                         flashMode = settings.flashMode,
                         aspectRatio = settings.aspectRatio,
                         highestResolution = settings.highestResolution,
+                        temperature = settings.temperature,
                         timerSeconds = settings.timerSeconds,
                         gridEnabled = settings.gridEnabled,
+                        style = settings.style,
                     )
                 }
             }
@@ -203,6 +206,8 @@ class CameraViewModel(
                 exposureMode = ExposureMode.Auto,
                 focusMode = FocusMode.CONTINUOUS,
                 flashMode = state.flashMode,
+                temperature = state.temperature,
+                style = state.style,
                 outputSettings = OutputSettings(locationTagging = geotaggingEnabled),
             )
             coordinator.capture(request)
@@ -231,6 +236,22 @@ class CameraViewModel(
     override fun onSetExposureCompensation(ev: Float) {
         _uiState.update { it.copy(exposureCompensationEv = ev) }
         viewModelScope.launch { controller.setExposureCompensation(ev) }
+    }
+
+    override fun onSetTemperature(temperature: Float) {
+        val value = temperature.coerceIn(-1f, 1f)
+        _uiState.update { it.copy(temperature = value) }
+        viewModelScope.launch { settingsRepository.setTemperature(value) }
+    }
+
+    override fun onSetStyle(style: StyleState) {
+        _uiState.update { it.copy(style = style) }
+        viewModelScope.launch { settingsRepository.setStyle(style) }
+    }
+
+    override fun onSelectStylePreset(style: StyleState) {
+        val next = style.copy(strength = _uiState.value.style.strength)
+        onSetStyle(next)
     }
 
 
