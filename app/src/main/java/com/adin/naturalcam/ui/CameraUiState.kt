@@ -28,6 +28,8 @@ data class CameraUiState(
     val highestResolution: Boolean = false,
     val timerSeconds: Int = 0,
     val gridEnabled: Boolean = false,
+    /** Style workspace is open; not persisted across launches. */
+    val styleMode: Boolean = false,
     val style: StyleState = StyleState(),
     val lastCapture: SavedPhoto? = null,
     val isShutterEnabled: Boolean = true,
@@ -50,6 +52,8 @@ interface CameraActions {
     fun onSetStyle(style: StyleState)
     fun onSetRawMode(rawMode: RawMode)
     fun onSelectStylePreset(style: StyleState)
+    /** Opens/closes the style workspace (used by the entry button and system back). */
+    fun onSetStyleMode(enabled: Boolean)
     fun onCycleTimer()
     fun onSetAspectRatio(aspectRatio: AspectRatio)
     fun onSetHighestResolution(enabled: Boolean)

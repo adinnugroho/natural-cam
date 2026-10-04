@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.adin.naturalcam.image.PipelineAndYuvTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-10-03T03:40:04.030Z" hostname="DESKTOP-5NKLUF6" time="0.029">
+<testsuite name="com.adin.naturalcam.image.PipelineAndYuvTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-10-04T11:35:45.160Z" hostname="DESKTOP-5NKLUF6" time="0.049">
   <properties/>
-  <testcase name="pure raw output of neutral scene stays neutral" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.016"/>
-  <testcase name="yuv path runs end to end" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.003"/>
+  <testcase name="pure raw output of neutral scene stays neutral" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.017"/>
+  <testcase name="yuv path runs end to end" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.017"/>
   <testcase name="pipeline version is stable for regression tracking" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.0"/>
   <testcase name="yuv black and white map to linear endpoints" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.0"/>
   <testcase name="natural applies tone while pure stays minimal" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.002"/>
-  <testcase name="pipeline develops raw for every cfa layout" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.004"/>
+  <testcase name="natural recipe carries its own exposure lift" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.0"/>
+  <testcase name="pipeline develops raw for every cfa layout" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.006"/>
   <testcase name="yuv converter is stride independent" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.003"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>

@@ -249,6 +249,10 @@ class CameraViewModel(
         viewModelScope.launch { settingsRepository.setStyle(style) }
     }
 
+    override fun onSetStyleMode(enabled: Boolean) {
+        _uiState.update { it.copy(styleMode = enabled) }
+    }
+
     override fun onSelectStylePreset(style: StyleState) {
         val next = style.copy(strength = _uiState.value.style.strength)
         onSetStyle(next)

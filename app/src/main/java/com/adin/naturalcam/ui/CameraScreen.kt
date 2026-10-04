@@ -8,6 +8,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.activity.compose.BackHandler
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -23,6 +24,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.IntrinsicSize
@@ -44,7 +46,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -104,6 +105,10 @@ import com.adin.naturalcam.ui.theme.CameraControl
 import com.adin.naturalcam.ui.theme.CameraOrange
 import com.adin.naturalcam.ui.theme.CameraOverlay
 import com.adin.naturalcam.ui.theme.CameraWhite
+import com.adin.naturalcam.ui.theme.NeumBase
+import com.adin.naturalcam.ui.theme.neuPressed
+import com.adin.naturalcam.ui.theme.neuRaised
+import com.adin.naturalcam.ui.theme.neuRaisedCircle
 import com.adin.naturalcam.ui.theme.cameraChoiceColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -159,24 +164,26 @@ fun CameraScreen(
         }
     }
 
-    var styleMode by remember { mutableStateOf(false) }
+    val styleMode = state.styleMode
 
     Box(Modifier.fillMaxSize().background(CameraBlack)) {
+        // Full-bleed ratios keep the original look: preview behind the chrome.
         if (immersivePreview) {
             Preview(state, actions, previewCreated, frozenLensFrame, Modifier.fillMaxSize())
         }
         Column(Modifier.fillMaxSize()) {
             if (styleMode) {
-                StyleModeTopBar(state, actions) { styleMode = false }
+                StyleModeTopBar(state, actions) { actions.onSetStyleMode(false) }
             } else {
                 TopControls(state, actions, caps, immersivePreview, popup) { popup = it }
             }
-            if (!immersivePreview) {
+            if (immersivePreview) {
+                Spacer(Modifier.weight(1f))
+            } else {
+                // 4:3 viewfinder fits exactly between the two control bars.
                 Box(Modifier.fillMaxWidth().weight(1f)) {
                     Preview(state, actions, previewCreated, frozenLensFrame, Modifier.fillMaxSize())
                 }
-            } else {
-                Spacer(Modifier.weight(1f))
             }
             val failed = state.captureState as? CaptureState.Failed
             if (failed != null) ErrorBar(failed, Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
@@ -186,7 +193,7 @@ fun CameraScreen(
             if (styleMode) {
                 SinglePadEditor(state.style, actions::onSetStyle)
             } else {
-                BottomBar(state, actions, shutterScale.value, busy, immersivePreview, popup, freezePreviewForLensSwitch, { styleMode = true }) { popup = it }
+                BottomBar(state, actions, shutterScale.value, busy, immersivePreview, popup, freezePreviewForLensSwitch, { actions.onSetStyleMode(true) }) { popup = it }
             }
         }
         if (screenFlash.value > 0f) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = screenFlash.value)))
@@ -224,12 +231,17 @@ private fun Preview(
     val pinchZoom = remember { mutableStateOf(1f) }
     val gestureStartZoom = remember { mutableStateOf(1f) }
 
-    Box(modifier) {
-        val frame = if (frameRatio == null) Modifier.fillMaxSize() else Modifier
-            .fillMaxWidth()
-            .aspectRatio(frameRatio)
-            .align(Alignment.Center)
-        Box(frame) {
+    BoxWithConstraints(modifier) {
+        // Fit the capture ratio *inside* the available area. Using
+        // fillMaxWidth().aspectRatio() forces the height from the width, which
+        // overflows the box and drew the preview over the control bars.
+        val frame = if (frameRatio == null) {
+            Modifier.fillMaxSize()
+        } else {
+            val fitWidth = minOf(maxWidth, maxHeight * frameRatio)
+            Modifier.size(fitWidth, fitWidth / frameRatio)
+        }
+        Box(frame.align(Alignment.Center)) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { context ->
@@ -368,9 +380,9 @@ private fun StylePreviewOverlay(style: StyleState, modifier: Modifier) {
         val richness = style.color.y.coerceIn(-1f, 1f) * strength
         val palette = style.palette.y.coerceIn(-1f, 1f) * strength
         if (toneDepth != 0f) drawRect(if (toneDepth > 0f) Color.Black else Color.White, alpha = kotlin.math.abs(toneDepth) * 0.08f)
-        if (warmth != 0f) drawRect(if (warmth > 0f) Color(0xFFFFA16A) else Color(0xFF75A8FF), alpha = kotlin.math.abs(warmth) * 0.07f)
+        if (warmth != 0f) drawRect(if (warmth > 0f) Color(0xFFFFA16A) else Color(0xFF8A94A0), alpha = kotlin.math.abs(warmth) * 0.07f)
         if (richness != 0f) drawRect(if (richness > 0f) Color(0xFFFFD28A) else Color.White, alpha = kotlin.math.abs(richness) * 0.045f)
-        if (palette != 0f) drawRect(if (palette > 0f) Color(0xFFFFC66D) else Color(0xFF6E9BFF), alpha = kotlin.math.abs(palette) * 0.035f)
+        if (palette != 0f) drawRect(if (palette > 0f) Color(0xFFFFC66D) else Color(0xFF8A94A0), alpha = kotlin.math.abs(palette) * 0.035f)
     }
 }
 
@@ -405,69 +417,62 @@ private fun TopControls(
     popup: CameraPopup?,
     onPopupChange: (CameraPopup?) -> Unit,
 ) {
-    Surface(
-        modifier = Modifier
+    Box(
+        Modifier
             .fillMaxWidth()
             .statusBarsPadding()
-            .then(if (immersive) Modifier.padding(horizontal = 16.dp, vertical = 8.dp) else Modifier),
-        shape = RoundedCornerShape(if (immersive) 28.dp else 0.dp),
-        color = if (immersive) CameraOverlay else CameraBlack,
+            .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 6.dp)
+            .neuRaised(corner = 20.dp, depth = 5.dp),
     ) {
-            Row(
-                Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                    if (caps?.flashAvailable == true) {
-                        FlashButton(state.flashMode, popup == CameraPopup.FLASH) {
-                            onPopupChange(if (popup == CameraPopup.FLASH) null else CameraPopup.FLASH)
-                        }
-                        if (popup == CameraPopup.FLASH) {
-                            CameraPopupRow(
-                                FlashMode.entries.map { PopupOption(it.name, state.flashMode == it) },
-                                { actions.onSetFlash(FlashMode.entries[it]); onPopupChange(null) },
-                                { onPopupChange(null) },
-                            )
-                        }
-                    }
+        Row(
+            Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            if (caps?.flashAvailable == true) {
+                FlashButton(state.flashMode, popup == CameraPopup.FLASH) {
+                    onPopupChange(if (popup == CameraPopup.FLASH) null else CameraPopup.FLASH)
                 }
-                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    CameraTextButton(
-                        state.aspectRatio.label,
-                        "Pilih rasio foto, ${state.aspectRatio.label}",
-                        popup == CameraPopup.RATIO,
-                    ) {
-                        onPopupChange(if (popup == CameraPopup.RATIO) null else CameraPopup.RATIO)
-                    }
-                    if (popup == CameraPopup.RATIO) {
-                        CameraPopupRow(
-                            AspectRatio.entries.map { PopupOption(it.label, state.aspectRatio == it) },
-                            { actions.onSetAspectRatio(AspectRatio.entries[it]); onPopupChange(null) },
-                            { onPopupChange(null) },
-                        )
-                    }
+                if (popup == CameraPopup.FLASH) {
+                    CameraPopupRow(
+                        FlashMode.entries.map { PopupOption(it.name, state.flashMode == it) },
+                        { actions.onSetFlash(FlashMode.entries[it]); onPopupChange(null) },
+                        { onPopupChange(null) },
+                    )
                 }
-                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    CameraTextButton(
-                        rawModeLabel(state.rawMode),
-                        "Pilih output, ${rawModeLabel(state.rawMode)}",
-                        popup == CameraPopup.OUTPUT,
-                    ) {
-                        onPopupChange(if (popup == CameraPopup.OUTPUT) null else CameraPopup.OUTPUT)
-                    }
-                    if (popup == CameraPopup.OUTPUT) {
-                        CameraPopupRow(
-                            RawMode.entries.map { PopupOption(rawModeLabel(it), state.rawMode == it) },
-                            { actions.onSetRawMode(RawMode.entries[it]); onPopupChange(null) },
-                            { onPopupChange(null) },
-                        )
-                    }
-                }
-                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
-                    CameraIconButton(R.drawable.ic_settings, "Pengaturan", CameraWhite, false, actions::onOpenSettings)
-                }
+            } else {
+                Spacer(Modifier.width(48.dp))
             }
+            CameraTextButton(
+                state.aspectRatio.label,
+                "Pilih rasio foto, ${state.aspectRatio.label}",
+                popup == CameraPopup.RATIO,
+            ) {
+                onPopupChange(if (popup == CameraPopup.RATIO) null else CameraPopup.RATIO)
+            }
+            if (popup == CameraPopup.RATIO) {
+                CameraPopupRow(
+                    AspectRatio.entries.map { PopupOption(it.label, state.aspectRatio == it) },
+                    { actions.onSetAspectRatio(AspectRatio.entries[it]); onPopupChange(null) },
+                    { onPopupChange(null) },
+                )
+            }
+            CameraTextButton(
+                rawModeLabel(state.rawMode),
+                "Pilih output, ${rawModeLabel(state.rawMode)}",
+                popup == CameraPopup.OUTPUT,
+            ) {
+                onPopupChange(if (popup == CameraPopup.OUTPUT) null else CameraPopup.OUTPUT)
+            }
+            if (popup == CameraPopup.OUTPUT) {
+                CameraPopupRow(
+                    RawMode.entries.map { PopupOption(rawModeLabel(it), state.rawMode == it) },
+                    { actions.onSetRawMode(RawMode.entries[it]); onPopupChange(null) },
+                    { onPopupChange(null) },
+                )
+            }
+            CameraIconButton(R.drawable.ic_settings, "Pengaturan", CameraWhite, false, actions::onOpenSettings)
+        }
     }
 }
 
@@ -475,25 +480,31 @@ private fun TopControls(
 private fun FlashButton(mode: FlashMode, active: Boolean, onClick: () -> Unit) {
     Box(
         Modifier
-            .width(48.dp)
-            .height(44.dp)
-            .then(if (active) Modifier.border(1.5.dp, CameraOrange, RoundedCornerShape(22.dp)) else Modifier)
+            .width(44.dp)
+            .height(34.dp)
+            .then(if (active) Modifier.neuPressed(corner = 12.dp, depth = 2.dp) else Modifier.neuRaised(corner = 12.dp, depth = 3.dp))
             .semantics { contentDescription = "Pilih flash, ${mode.name}" }
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
+        val flashOn = mode != FlashMode.OFF
         Icon(
             painterResource(R.drawable.ic_flash),
             null,
-            Modifier.align(Alignment.TopCenter).size(28.dp),
-            if (mode == FlashMode.OFF) CameraWhite else CameraOrange,
+            if (flashOn) {
+                Modifier.align(Alignment.TopCenter).padding(top = 3.dp).size(18.dp)
+            } else {
+                // Centred when there is no mode label under it.
+                Modifier.align(Alignment.Center).size(19.dp)
+            },
+            if (flashOn) CameraOrange else CameraWhite,
         )
         if (mode != FlashMode.OFF) {
             Text(
                 text = mode.name,
                 color = CameraOrange,
-                fontSize = 7.sp,
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 1.dp),
+                fontSize = 6.sp,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 2.dp),
             )
         }
     }
@@ -503,14 +514,14 @@ private fun FlashButton(mode: FlashMode, active: Boolean, onClick: () -> Unit) {
 private fun CameraIconButton(icon: Int, description: String, tint: Color, active: Boolean, onClick: () -> Unit) {
     Box(
         Modifier
-            .width(48.dp)
-            .height(44.dp)
-            .then(if (active) Modifier.border(1.5.dp, CameraOrange, RoundedCornerShape(22.dp)) else Modifier)
+            .width(44.dp)
+            .height(34.dp)
+            .then(if (active) Modifier.neuPressed(corner = 12.dp, depth = 2.dp) else Modifier.neuRaised(corner = 12.dp, depth = 3.dp))
             .semantics { contentDescription = description }
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(painterResource(icon), null, Modifier.size(28.dp), tint)
+        Icon(painterResource(icon), null, Modifier.size(19.dp), tint)
     }
 }
 
@@ -518,13 +529,13 @@ private fun CameraIconButton(icon: Int, description: String, tint: Color, active
 private fun CameraTextButton(text: String, description: String, active: Boolean, onClick: () -> Unit) {
     Box(
         Modifier
-            .height(44.dp)
-            .widthIn(min = 72.dp)
-            .then(if (active) Modifier.border(1.5.dp, CameraOrange, RoundedCornerShape(22.dp)) else Modifier)
+            .height(34.dp)
+            .widthIn(min = 60.dp)
+            .then(if (active) Modifier.neuPressed(corner = 12.dp, depth = 2.dp) else Modifier.neuRaised(corner = 12.dp, depth = 3.dp))
             .semantics { contentDescription = description }
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
-    ) { Text(text = text, color = CameraWhite, style = MaterialTheme.typography.labelLarge) }
+    ) { Text(text = text, color = CameraWhite, style = MaterialTheme.typography.labelMedium) }
 }
 
 private data class PopupOption(val label: String, val selected: Boolean)
@@ -562,7 +573,7 @@ private fun CameraPopupRow(
                         .height(itemHeight)
                         .semantics { contentDescription = if (option.selected) "${option.label}, terpilih" else option.label }
                         .clickable { onSelect(index) },
-                    RoundedCornerShape(14.dp),
+                    RoundedCornerShape(8.dp),
                     Color(0x8C000000),
                     border = BorderStroke(1.dp, CameraWhite.copy(alpha = 0.28f)),
                 ) {
@@ -614,28 +625,27 @@ private fun BottomBar(
     val visibleLenses = selectableLenses.sortedByDescending { it.cameraId == state.selectedCameraId }.distinctBy { it.label.replace("×", "X").uppercase() }
     val exposureCaps = state.capabilities?.takeIf { it.exposureCompensationUsable }
 
-    Column(
-        Modifier.fillMaxWidth().background(if (immersive) Color.Transparent else CameraBlack).navigationBarsPadding().padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 4.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+    // Clear the system gesture bar, then leave a 2px margin above it.
+    val bottomMargin = with(androidx.compose.ui.platform.LocalDensity.current) { 2.toDp() }
+
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(start = 12.dp, end = 12.dp, bottom = bottomMargin)
+            .neuRaised(corner = 22.dp, depth = 6.dp),
     ) {
-        Box(Modifier.fillMaxWidth().height(44.dp), contentAlignment = Alignment.Center) {
+        Column(
+            Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+        Box(Modifier.fillMaxWidth().height(36.dp), contentAlignment = Alignment.Center) {
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                StyleButton(state.profile, popup == CameraPopup.PROFILE) {
-                    onPopupChange(if (popup == CameraPopup.PROFILE) null else CameraPopup.PROFILE)
-                }
-                if (popup == CameraPopup.PROFILE) {
-                    CameraPopupRow(
-                        ProcessingProfile.entries.map { PopupOption(it.name, state.profile == it) },
-                        { actions.onSelectProfile(ProcessingProfile.entries[it]); onPopupChange(null) },
-                        { onPopupChange(null) },
-                        preferAbove = true,
-                    )
-                }
                 StylePadButton(state.style, popup == CameraPopup.STYLE) {
                     onOpenStyleMode()
                 }
@@ -667,49 +677,24 @@ private fun BottomBar(
         if (exposureCaps != null) ExposureControl(exposureCaps, state.exposureCompensationEv, actions::onSetExposureCompensation, immersive)
         CaptureControls(state.lastCapture, switchCameraId, state.isShutterEnabled, busy, shutterScale, actions::onOpenGallery, actions::onShutter) { switchCameraId?.let(actions::onSelectLens) }
     }
-}
-
-
-@Composable
-private fun StyleButton(profile: ProcessingProfile, active: Boolean, onClick: () -> Unit) {
-    val swatches = when (profile) {
-        ProcessingProfile.PURE -> listOf(Color(0xFF6F767A), Color(0xFFB6BBB8), Color(0xFFE8E8E2))
-        ProcessingProfile.NATURAL -> listOf(Color(0xFF5F6864), Color(0xFFC48B65), Color(0xFFE6C7A5))
-        ProcessingProfile.SYSTEM -> listOf(Color(0xFF4C79A8), Color(0xFF7B68B2), Color(0xFFD4A7E8))
-    }
-    Surface(
-        Modifier
-            .width(56.dp)
-            .height(40.dp)
-            .semantics { contentDescription = "Pilih gaya gambar, ${profile.name}" }
-            .clickable(onClick = onClick),
-        RoundedCornerShape(20.dp),
-        CameraControl,
-        border = BorderStroke(1.5.dp, if (active) CameraOrange else CameraWhite.copy(alpha = 0.65f)),
-    ) {
-        Box(contentAlignment = Alignment.Center) {
-            Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                swatches.forEach { color ->
-                    Box(Modifier.size(width = 8.dp, height = 20.dp).background(color, RoundedCornerShape(3.dp)))
-                }
-            }
         }
     }
-}
+
+
 @Composable
 private fun StylePadButton(style: StyleState, active: Boolean, onClick: () -> Unit) {
-    Surface(
+    Box(
         Modifier
-            .size(56.dp, 40.dp)
+            .width(46.dp)
+            .height(34.dp)
+            .then(if (active) Modifier.neuPressed(corner = 12.dp, depth = 2.dp) else Modifier.neuRaised(corner = 12.dp, depth = 3.dp))
             .semantics { contentDescription = "Buka panel gaya" }
             .clickable(onClick = onClick),
-        RoundedCornerShape(20.dp),
-        CameraControl,
-        border = BorderStroke(1.5.dp, if (active) CameraOrange else CameraWhite.copy(alpha = 0.65f)),
+        contentAlignment = Alignment.Center,
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(14.dp).background(Color(0xFFE8C46A), RoundedCornerShape(3.dp)))
-            Box(Modifier.size(14.dp).background(Color(0xFF7A6FE0), RoundedCornerShape(3.dp)))
+            Box(Modifier.size(11.dp).background(Color(0xFFFFC93C), RoundedCornerShape(3.dp)))
+            Box(Modifier.size(11.dp).background(Color(0xFFF2F2EE), RoundedCornerShape(3.dp)))
         }
     }
 }
@@ -721,13 +706,16 @@ private fun StyleModeTopBar(
     actions: CameraActions,
     onBack: () -> Unit,
 ) {
-    Surface(
-        modifier = Modifier.fillMaxWidth().statusBarsPadding(),
-        color = CameraBlack,
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 8.dp)
+            .neuRaised(corner = 20.dp, depth = 5.dp)
+            .padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = 8.dp),
     ) {
-        Column {
             Row(
-                Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 12.dp),
+                Modifier.fillMaxWidth().height(40.dp).padding(horizontal = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Box(Modifier.width(48.dp), contentAlignment = Alignment.CenterStart) {
@@ -746,32 +734,39 @@ private fun StyleModeTopBar(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .height(44.dp)
+                    .height(42.dp)
                     .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 StylePresets.entries.forEach { preset ->
                     val selected = preset.state == state.style.copy(strength = state.style.strength)
                     Box(
                         Modifier
-                            .height(34.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (selected) CameraOrange else CameraControl)
-                            .then(if (selected) Modifier else Modifier.border(1.dp, CameraWhite.copy(alpha = 0.25f), RoundedCornerShape(12.dp)))
-                            .clickable { actions.onSelectStylePreset(preset.state) }
-                            .padding(horizontal = 12.dp),
+                            .height(30.dp)
+                            .then(
+                                if (selected) {
+                                    Modifier
+                                        .clip(RoundedCornerShape(15.dp))
+                                        .background(CameraOrange)
+                                } else {
+                                    Modifier.neuRaised(corner = 15.dp, depth = 2.dp)
+                                },
+                            )
+                            .clickable { actions.onSelectStylePreset(preset.state) },
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
                             preset.name,
-                            color = if (selected) CameraBlack else CameraWhite,
-                            style = MaterialTheme.typography.labelMedium,
+                            color = if (selected) CameraBlack else CameraWhite.copy(alpha = 0.75f),
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 12.dp),
                         )
                     }
                 }
             }
-        }
+            // Explicit gap so chip shadows never bleed into the preview surface.
+            Spacer(Modifier.height(12.dp))
     }
 }
 
@@ -793,24 +788,28 @@ private fun SinglePadEditor(
     onStyleChange: (StyleState) -> Unit,
 ) {
     val point = singlePadPoint(style)
-    Column(
+    val bottomMargin = with(androidx.compose.ui.platform.LocalDensity.current) { 2.toDp() }
+    Box(
         Modifier
             .fillMaxWidth()
-            .background(Color.Black.copy(alpha = 0.45f))
             .navigationBarsPadding()
-            .padding(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 8.dp),
+            .padding(start = 12.dp, end = 12.dp, bottom = bottomMargin)
+            .neuRaised(corner = 22.dp, depth = 6.dp),
+    ) {
+    Column(
+        Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Row(
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Compact square pad inside the bottom bar area.
+            // Compact square pad inside the dock.
             SinglePad(point, onPointChange = { pt -> onStyleChange(singlePadToStyle(pt, style)) })
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "STRENGTH ${(style.strength * 100).roundToInt()}%",
-                    color = CameraWhite.copy(alpha = 0.62f),
+                    "STRENGTH",
+                    color = CameraWhite.copy(alpha = 0.55f),
                     style = MaterialTheme.typography.labelSmall,
                 )
                 Slider(
@@ -820,17 +819,25 @@ private fun SinglePadEditor(
                     colors = SliderDefaults.colors(
                         thumbColor = CameraOrange,
                         activeTrackColor = CameraOrange,
-                        inactiveTrackColor = CameraWhite.copy(alpha = 0.35f),
+                        inactiveTrackColor = CameraBlack,
                     ),
                 )
                 Text(
-                    "RESET",
-                    color = CameraWhite,
+                    "${(style.strength * 100).roundToInt()}%",
+                    color = CameraOrange,
                     style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier.clickable { onStyleChange(StyleState()) },
                 )
+                Box(
+                    Modifier
+                        .neuRaised(corner = 14.dp, depth = 4.dp)
+                        .clickable { onStyleChange(StyleState()) }
+                        .padding(horizontal = 18.dp, vertical = 10.dp),
+                ) {
+                    Text("RESET", color = CameraWhite, style = MaterialTheme.typography.labelMedium)
+                }
             }
         }
+    }
     }
 }
 
@@ -860,11 +867,11 @@ private fun SinglePad(
     var padSize by remember { mutableStateOf(IntSize.Zero) }
     Box(
         Modifier
-            .width(150.dp)
+            .width(112.dp)
             .aspectRatio(1f)
             .onSizeChanged { padSize = it }
-            .clip(RoundedCornerShape(16.dp))
-            .background(Color(0x26FFFFFF))
+            .neuPressed(corner = 18.dp, depth = 4.dp)
+            .clip(RoundedCornerShape(18.dp))
             // A 10×10 grid makes pad movement predictable and repeatable.
             .pointerInput(Unit) {
                 fun snap(value: Float): Float = (value * 10f).roundToInt().coerceIn(-10, 10) / 10f
@@ -880,7 +887,7 @@ private fun SinglePad(
             // with darker lower values and no textual axis tags.
             drawRect(
                 Brush.linearGradient(
-                    listOf(Color(0xFF456AA6), Color(0xFF6C667D), Color(0xFFD18A62)),
+                    listOf(Color(0xFF4A4A50), Color(0xFF6B6660), Color(0xFFC69A4E)),
                     start = Offset(0f, size.height),
                     end = Offset(size.width, 0f),
                 ),
@@ -912,18 +919,18 @@ private val GRAY_LINE = CameraWhite.copy(alpha = 0.18f)
 
 @Composable
 private fun TemperatureButton(value: Float, active: Boolean, onClick: () -> Unit) {
-    Surface(
+    Box(
         Modifier
-            .size(56.dp, 40.dp)
+            .width(46.dp)
+            .height(34.dp)
+            .then(if (active) Modifier.neuPressed(corner = 12.dp, depth = 2.dp) else Modifier.neuRaised(corner = 12.dp, depth = 3.dp))
             .semantics { contentDescription = "Pilih temperatur warna" }
             .clickable(onClick = onClick),
-        RoundedCornerShape(20.dp),
-        CameraControl,
-        border = BorderStroke(1.5.dp, if (active) CameraOrange else CameraWhite.copy(alpha = 0.65f)),
+        contentAlignment = Alignment.Center,
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(14.dp).background(Color(0xFFE64A4A), RoundedCornerShape(3.dp)))
-            Box(Modifier.size(14.dp).background(Color(0xFF4A78E6), RoundedCornerShape(3.dp)))
+            Box(Modifier.size(11.dp).background(Color(0xFFFF8A5C), RoundedCornerShape(3.dp)))
+            Box(Modifier.size(11.dp).background(Color(0xFF9CCBF5), RoundedCornerShape(3.dp)))
         }
     }
 }
@@ -950,14 +957,14 @@ private fun TemperaturePopup(value: Float, onValueChange: (Float) -> Unit, onDis
     ) {
         Surface(
             Modifier.width(270.dp).padding(10.dp),
-            RoundedCornerShape(18.dp),
+            RoundedCornerShape(10.dp),
             Color(0xD9000000),
             border = BorderStroke(1.dp, CameraWhite.copy(alpha = 0.28f)),
         ) {
             Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("COOL", color = Color(0xFF6F9BFF), style = MaterialTheme.typography.labelSmall)
-                    Text("WARM", color = Color(0xFFFF8B6B), style = MaterialTheme.typography.labelSmall)
+                    Text("COOL", color = Color(0xFF8C99A6), style = MaterialTheme.typography.labelSmall)
+                    Text("WARM", color = Color(0xFFD99A6C), style = MaterialTheme.typography.labelSmall)
                 }
                 Slider(
                     value = value,
@@ -977,11 +984,17 @@ private fun TemperaturePopup(value: Float, onValueChange: (Float) -> Unit, onDis
 
 @Composable
 private fun LensButton(label: String, enabled: Boolean, active: Boolean, onClick: () -> Unit) {
-    Surface(Modifier.size(42.dp).semantics { contentDescription = "Pilih lensa, $label" }.clickable(enabled = enabled, onClick = onClick).alpha(if (enabled) 1f else 0.4f), CircleShape, CameraControl, border = BorderStroke(2.dp, if (active) CameraOrange else CameraWhite)) {
-        Box(contentAlignment = Alignment.Center) {
-            AnimatedContent(targetState = label, label = "lens-label") { selectedLabel ->
-                Text(selectedLabel, color = CameraWhite, style = MaterialTheme.typography.labelMedium)
-            }
+    Box(
+        Modifier
+            .size(42.dp)
+            .then(if (active) Modifier.neuPressed(corner = 21.dp, depth = 3.dp) else Modifier.neuRaised(corner = 21.dp, depth = 4.dp))
+            .semantics { contentDescription = "Pilih lensa, $label" }
+            .clickable(enabled = enabled, onClick = onClick)
+            .alpha(if (enabled) 1f else 0.4f),
+        contentAlignment = Alignment.Center,
+    ) {
+        AnimatedContent(targetState = label, label = "lens-label") { selectedLabel ->
+            Text(selectedLabel, color = if (active) CameraOrange else CameraWhite, style = MaterialTheme.typography.labelLarge)
         }
     }
 }
@@ -989,18 +1002,37 @@ private fun LensButton(label: String, enabled: Boolean, active: Boolean, onClick
 @Composable
 private fun ExposureControl(caps: CameraCapabilities, value: Float, onValueChange: (Float) -> Unit, immersive: Boolean) {
     val range = caps.exposureCompensationEvRange ?: (0f..0f)
-    Surface(Modifier.fillMaxWidth(), CircleShape, if (immersive) CameraOverlay else CameraBlack) {
-        Row(Modifier.padding(horizontal = 14.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("EV", color = CameraOrange, style = MaterialTheme.typography.labelLarge)
-            Column(Modifier.weight(1f)) {
-                Slider(value.coerceIn(range), onValueChange, valueRange = range, steps = evSteps(caps), modifier = Modifier.height(30.dp), colors = SliderDefaults.colors(thumbColor = CameraOrange, activeTrackColor = CameraWhite, inactiveTrackColor = CameraWhite.copy(alpha = 0.35f), activeTickColor = CameraBlack, inactiveTickColor = CameraWhite.copy(alpha = 0.65f)))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(range.start.toEvLabel(), color = CameraWhite, style = MaterialTheme.typography.labelSmall)
-                    Text("0", color = CameraOrange, style = MaterialTheme.typography.labelSmall)
-                    Text(range.endInclusive.toEvLabel(), color = CameraWhite, style = MaterialTheme.typography.labelSmall)
-                }
-            }
-            Text(value.toEvLabel(true), color = CameraOrange, style = MaterialTheme.typography.labelLarge)
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .neuPressed(corner = 14.dp, depth = 3.dp),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("EV", color = CameraOrange, style = MaterialTheme.typography.labelSmall)
+            Slider(
+                value.coerceIn(range),
+                onValueChange,
+                valueRange = range,
+                steps = evSteps(caps),
+                modifier = Modifier.weight(1f).height(22.dp),
+                colors = SliderDefaults.colors(
+                    thumbColor = CameraOrange,
+                    activeTrackColor = CameraOrange,
+                    inactiveTrackColor = CameraBlack,
+                    activeTickColor = CameraBlack,
+                    inactiveTickColor = CameraWhite.copy(alpha = 0.3f),
+                ),
+            )
+            Text(
+                value.toEvLabel(true),
+                color = CameraOrange,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.widthIn(min = 46.dp),
+            )
         }
     }
 }
@@ -1021,9 +1053,15 @@ private fun CaptureControls(lastCapture: SavedPhoto?, switchCameraId: CameraId?,
 
 @Composable
 private fun CameraSwitchButton(enabled: Boolean, onClick: () -> Unit) {
-    Surface(Modifier.size(64.dp).semantics { contentDescription = "Ganti kamera" }.clickable(enabled = enabled, onClick = onClick).alpha(if (enabled) 1f else 0.4f), CircleShape, CameraControl) {
-        Box(contentAlignment = Alignment.Center) { Icon(painterResource(R.drawable.ic_switch_camera), null, Modifier.size(30.dp), CameraWhite) }
-    }
+    Box(
+        Modifier
+            .size(48.dp)
+            .neuRaised(corner = 24.dp, depth = 4.dp)
+            .semantics { contentDescription = "Ganti kamera" }
+            .clickable(enabled = enabled, onClick = onClick)
+            .alpha(if (enabled) 1f else 0.4f),
+        contentAlignment = Alignment.Center,
+    ) { Icon(painterResource(R.drawable.ic_switch_camera), null, Modifier.size(22.dp), CameraWhite) }
 }
 
 @Composable
@@ -1040,13 +1078,13 @@ private fun GalleryShortcut(lastCapture: SavedPhoto?, onClick: () -> Unit) {
     }
     Box(
         Modifier
-            .size(60.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .size(48.dp)
+            .neuRaised(corner = 14.dp, depth = 4.dp)
+            .clip(RoundedCornerShape(14.dp))
             .semantics {
                 contentDescription = if (lastCapture == null) "Galeri, belum ada foto" else "Buka galeri"
             }
-            .clickable(onClick = onClick)
-            .background(if (lastCapture == null) CameraControl else MaterialTheme.colorScheme.surfaceVariant),
+            .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         thumbnail?.let {
@@ -1062,9 +1100,24 @@ private fun GalleryShortcut(lastCapture: SavedPhoto?, onClick: () -> Unit) {
 
 @Composable
 private fun ShutterButton(enabled: Boolean, active: Boolean, scale: Float, onClick: () -> Unit) {
-    Box(Modifier.scale(scale).size(88.dp).semantics { contentDescription = "Ambil foto" }.clickable(enabled = enabled, onClick = onClick).alpha(if (enabled) 1f else 0.45f).background(CameraWhite, CircleShape), contentAlignment = Alignment.Center) {
-        Box(Modifier.size(77.dp).background(CameraBlack, CircleShape), contentAlignment = Alignment.Center) {
-            Box(Modifier.size(65.dp).background(if (active) CameraOrange else CameraWhite, CircleShape))
+    Box(
+        Modifier
+            .scale(scale)
+            .size(74.dp)
+            .neuRaisedCircle(depth = 6.dp)
+            .semantics { contentDescription = "Ambil foto" }
+            .clickable(enabled = enabled, onClick = onClick)
+            .alpha(if (enabled) 1f else 0.45f),
+        contentAlignment = Alignment.Center,
+    ) {
+        // Inset ring: the recess reads as a lens barrel rather than a flat button.
+        Box(
+            Modifier
+                .size(56.dp)
+                .neuPressed(corner = 28.dp, depth = 3.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(Modifier.size(40.dp).background(if (active) CameraOrange else CameraWhite, CircleShape))
         }
     }
 }

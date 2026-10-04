@@ -162,8 +162,17 @@ class PipelineAndYuvTest {
 
     @Test
     fun `pipeline version is stable for regression tracking`() {
-        assertEquals("natural-v15", ProcessingConfiguration.forProfile(ProcessingProfile.NATURAL).pipelineVersion)
+        assertEquals("natural-v16", ProcessingConfiguration.forProfile(ProcessingProfile.NATURAL).pipelineVersion)
         assertEquals("pure-v2", ProcessingConfiguration.forProfile(ProcessingProfile.PURE).pipelineVersion)
         assertEquals(ProcessingConfiguration.PIPELINE_VERSION, DefaultImagePipeline(RecordingEncoder()).version)
+    }
+
+    @Test
+    fun `natural recipe carries its own exposure lift`() {
+        // The NATURAL look includes a fixed pipeline lift, independent of the
+        // camera EV control. PURE and SYSTEM must never inherit it.
+        assertEquals(1.5f, ProcessingConfiguration.forProfile(ProcessingProfile.NATURAL).tone.exposureStops, 0f)
+        assertEquals(0f, ProcessingConfiguration.forProfile(ProcessingProfile.PURE).tone.exposureStops, 0f)
+        assertEquals(0f, ProcessingConfiguration.forProfile(ProcessingProfile.SYSTEM).tone.exposureStops, 0f)
     }
 }

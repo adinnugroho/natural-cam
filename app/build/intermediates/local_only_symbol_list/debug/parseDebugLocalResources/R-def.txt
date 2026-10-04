@@ -4,6 +4,7 @@ color ic_launcher_background
 drawable ic_back
 drawable ic_flash
 drawable ic_info
+drawable ic_launcher_background
 drawable ic_launcher_foreground
 drawable ic_settings
 drawable ic_switch_camera

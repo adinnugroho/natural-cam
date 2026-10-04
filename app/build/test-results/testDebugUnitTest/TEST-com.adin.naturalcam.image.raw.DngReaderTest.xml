@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.adin.naturalcam.image.raw.DngReaderTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-10-03T03:40:04.072Z" hostname="DESKTOP-5NKLUF6" time="0.044">
+<testsuite name="com.adin.naturalcam.image.raw.DngReaderTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-10-04T11:35:45.254Z" hostname="DESKTOP-5NKLUF6" time="0.039">
   <properties/>
-  <testcase name="rejects non tiff data" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.008"/>
-  <testcase name="reads all four cfa layouts with correct channel mapping" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.021"/>
-  <testcase name="black level canonicalized to per color" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.003"/>
-  <testcase name="tolerates exotic and unknown tag types from real producers" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.003"/>
-  <testcase name="as shot neutral and matrices preserved" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.003"/>
+  <testcase name="rejects non tiff data" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.004"/>
+  <testcase name="reads all four cfa layouts with correct channel mapping" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.017"/>
+  <testcase name="black level canonicalized to per color" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.005"/>
+  <testcase name="tolerates exotic and unknown tag types from real producers" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.004"/>
+  <testcase name="as shot neutral and matrices preserved" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.004"/>
   <testcase name="pixel values preserved end to end" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.004"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>

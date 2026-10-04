@@ -645,6 +645,7 @@ drawable ic_call_decline
 drawable ic_call_decline_low
 drawable ic_flash
 drawable ic_info
+drawable ic_launcher_background
 drawable ic_launcher_foreground
 drawable ic_settings
 drawable ic_switch_camera

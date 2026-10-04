@@ -12,12 +12,19 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import com.adin.naturalcam.R
 
-val CameraBlack = Color(0xFF000000)
-val CameraWhite = Color(0xFFFFFFFF)
-val CameraOrange = Color(0xFFFF5A24)
-val CameraControl = Color(0xFF1E1E1E)
-val CameraOverlay = Color(0x94000000)
-val CameraMuted = Color(0xFFB6B6B6)
+// Neutral dark grey base with a deep yellow accent. Neumorphism needs a
+// mid-tone surface so both the highlight and shadow sides stay visible.
+val CameraBlack = Color(0xFF101010)
+val CameraWhite = Color(0xFFDCDCDA)
+val CameraOrange = Color(0xFFE0AE33)
+val CameraControl = Color(0xFF101010)
+val CameraOverlay = Color(0xF0101010)
+val CameraMuted = Color(0xFF8E8E8A)
+
+/** Soft-UI material: base panel, light source, and shadow side (neutral greys). */
+val NeumBase = Color(0xFF171717)
+val NeumHighlight = Color(0xFF343434)
+val NeumShadow = Color(0xFF050505)
 
 private val SpaceMono = FontFamily(
     Font(R.font.space_mono_regular, FontWeight.Normal),

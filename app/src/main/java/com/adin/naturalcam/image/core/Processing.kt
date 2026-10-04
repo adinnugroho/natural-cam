@@ -12,8 +12,12 @@ internal const val NATURAL_CHROMA_DENOISE_STRENGTH = 0.18f
  * until real-device evaluation (AGENTS 63) — see LIMITATIONS.md.
  */
 data class ToneConfig(
-    /** Moderate NATURAL lift in linear light requested for brighter final images. */
-    val exposureStops: Float = 0.30f,
+    /**
+     * NATURAL recipe exposure lift in stops, applied in linear light inside the
+     * pipeline. This is a fixed part of the NATURAL look, independent of the
+     * camera EV control the user drives from the shutter bar.
+     */
+    val exposureStops: Float = 1.5f,
     /** Above-unity toe exponent keeps shadows deeper while the lift restores overall brightness. */
     val midtoneGamma: Float = 1.04f,
     /** Slightly stronger global contrast keeps the lifted image from looking faded. */
@@ -43,7 +47,7 @@ data class ProcessingConfiguration(
     val jpegQuality: Int = 92,
 ) {
     companion object {
-        const val PIPELINE_VERSION = "natural-v15"
+        const val PIPELINE_VERSION = "natural-v16"
 
         fun forProfile(
             profile: ProcessingProfile,
@@ -64,7 +68,8 @@ data class ProcessingConfiguration(
                 ProcessingProfile.PURE -> ProcessingConfiguration(
                     profile = profile,
                     pipelineVersion = "pure-v2",
-                    tone = ToneConfig(contrast = 0f, highlightCompression = 0f),
+                    // Explicit: PURE never takes the NATURAL recipe lift.
+                    tone = ToneConfig(exposureStops = 0f, contrast = 0f, highlightCompression = 0f),
                     chromaDenoiseStrength = 0f,
                     lumaDenoiseStrength = 0f,
                     sharpenAmount = 0f,
@@ -74,7 +79,8 @@ data class ProcessingConfiguration(
                 ProcessingProfile.SYSTEM -> ProcessingConfiguration(
                     profile = profile,
                     pipelineVersion = "system-passthrough",
-                    tone = ToneConfig(contrast = 0f, highlightCompression = 0f),
+                    // Explicit: SYSTEM never takes the NATURAL recipe lift.
+                    tone = ToneConfig(exposureStops = 0f, contrast = 0f, highlightCompression = 0f),
                     chromaDenoiseStrength = 0f,
                     lumaDenoiseStrength = 0f,
                     sharpenAmount = 0f,

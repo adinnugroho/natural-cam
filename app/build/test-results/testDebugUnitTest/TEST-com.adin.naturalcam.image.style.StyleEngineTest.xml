@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.adin.naturalcam.image.style.StyleEngineTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-10-04T11:35:45.295Z" hostname="DESKTOP-5NKLUF6" time="0.217">
+  <properties/>
+  <testcase name="neutral gray stays neutral under tone and color" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.123"/>
+  <testcase name="all outputs remain finite and non-negative" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.043"/>
+  <testcase name="strength interpolates monotonically toward styled value" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.0"/>
+  <testcase name="center pads are neutral" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.042"/>
+  <testcase name="strength zero equals natural" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.007"/>
+  <testcase name="shape is nonlinear with fine response near center" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

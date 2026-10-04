@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
@@ -126,6 +127,10 @@ private fun CameraApp(viewModel: CameraViewModel) {
     val settings by viewModel.currentSettings().collectAsState(
         initial = com.adin.naturalcam.domain.AppSettings(),
     )
+
+    // Registered outside the NavHost so the style workspace wins over the
+    // navigation library's own back callback; back returns to the viewfinder.
+    BackHandler(enabled = state.styleMode) { viewModel.onSetStyleMode(false) }
 
     NavHost(navController = navController, startDestination = ROUTE_CAMERA) {
         composable(ROUTE_CAMERA) {
