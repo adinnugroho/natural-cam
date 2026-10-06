@@ -134,29 +134,26 @@ class LensShadingTest {
         val map = DngReader.parseLensShading(constantMaps(ByteOrder.BIG_ENDIAN, 2, floatArrayOf(1f, 2f, 3f, 4f)), 2, 2)
         assertNotNull(map)
         LensShadingCorrector.correct(bayer, map!!)
-        // Colour-only: each gain is divided by the mean (2.5) before it is applied.
-        assertArrayEquals(floatArrayOf(0.04f, 0.08f, 0.12f, 0.16f), bayer.values, 1e-6f)
+        assertArrayEquals(floatArrayOf(0.1f, 0.2f, 0.3f, 0.4f), bayer.values, 1e-6f)
     }
 
     @Test
-    fun `a gain common to every CFA position is neutralised`() {
+    fun `a gain common to every CFA position is applied to all of them`() {
         val bayer = BayerImage(2, 2, CfaLayout.BGGR, FloatArray(4) { 0.5f })
         val map = DngReader.parseLensShading(constantMaps(ByteOrder.BIG_ENDIAN, 2, FloatArray(4) { 3f }), 2, 2)!!
         LensShadingCorrector.correct(bayer, map)
-        assertArrayEquals(floatArrayOf(0.5f, 0.5f, 0.5f, 0.5f), bayer.values, 1e-6f)
+        assertArrayEquals(floatArrayOf(1.5f, 1.5f, 1.5f, 1.5f), bayer.values, 1e-6f)
     }
 
+    /** The smoother scales its strength by this, so it must be the plain mean. */
     @Test
-    fun `colour shading is corrected relative to the shared gain`() {
-        val bayer = BayerImage(2, 2, CfaLayout.BGGR, FloatArray(4) { 0.4f })
+    fun `mean grid averages the CFA positions`() {
         val map = DngReader.parseLensShading(
-            constantMaps(ByteOrder.BIG_ENDIAN, 2, floatArrayOf(1f, 1f, 1f, 3f)),
+            constantMaps(ByteOrder.BIG_ENDIAN, 2, floatArrayOf(1f, 2f, 3f, 4f)),
             2,
             2,
         )!!
-        LensShadingCorrector.correct(bayer, map)
-        // mean = 1.5, so the red position gains 2.0 and the others 0.666...
-        assertArrayEquals(floatArrayOf(0.2666f, 0.2666f, 0.2666f, 0.8f), bayer.values, 1e-4f)
+        assertArrayEquals(FloatArray(4) { 2.5f }, map.meanGrid()!!, 1e-6f)
     }
 
     @Test

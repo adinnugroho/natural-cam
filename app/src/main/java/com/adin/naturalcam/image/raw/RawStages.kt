@@ -44,24 +44,18 @@ object RawNormalizer {
  * Oppo CPH2737). Mutates [bayer] and returns it (ownership transfer, AGENTS 45):
  * a full-frame copy would cost ~50 MB per 12 MP frame for no benefit.
  *
- * Only the *colour* part of the map is applied: every grid point is divided by
- * the mean gain across the CFA positions present, which makes the correction
- * luminance-neutral. A full shading correction multiplies sensor noise by the
- * gain — up to ~5x at the corner of this lens — and that lands as coloured
- * speckle in the shadows: measured on the Oppo CPH2737, dark pixels gained 46%
- * chroma noise overall and 117% at the frame corner. The colour cast is what
- * reads as a defect; the luminance vignette is a real property of the lens and
- * is left in place rather than paid for with shadow noise.
+ * The full map is applied: the lens's luminance vignette goes with the colour
+ * shading. That multiplies sensor noise by the gain (up to ~5x at the corner of
+ * this lens), so [ChromaSmoother] runs later in the NATURAL chain to absorb the
+ * amplified chroma.
  *
- * A map for a different frame, a single-position map (which cannot be split
- * into colour and luminance), or one with no entry for a CFA position leaves
+ * A map for a different frame, or one with no entry for a CFA position, leaves
  * that sample at its original value — no invented correction (AGENTS 18).
  */
 object LensShadingCorrector {
 
     fun correct(bayer: BayerImage, map: LensShadingMap): BayerImage {
         if (map.imageWidth != bayer.width || map.imageHeight != bayer.height) return bayer
-        val grids = colourOnly(map.grids)
         val width = bayer.width
         val height = bayer.height
         val columns = map.columns
@@ -89,7 +83,7 @@ object LensShadingCorrector {
                 val baseLow = rowLow * columns
                 val baseHigh = rowHigh * columns
                 for (x in 0 until width) {
-                    val grid = grids[(y and 1) * 2 + (x and 1)] ?: continue
+                    val grid = map.grids[(y and 1) * 2 + (x and 1)] ?: continue
                     val low = columnLow[x]
                     val high = columnHigh[x]
                     val fracX = columnFrac[x]
@@ -102,25 +96,6 @@ object LensShadingCorrector {
             }
         }
         return bayer
-    }
-
-    /**
-     * Splits the map into colour only: every grid point is divided by the mean
-     * gain of the CFA positions present. With fewer than two positions there is
-     * nothing to split, so the map is used unchanged.
-     */
-    private fun colourOnly(grids: Array<FloatArray?>): Array<FloatArray?> {
-        val present = grids.filterNotNull()
-        if (present.size < 2) return grids
-        return Array(grids.size) { index ->
-            grids[index]?.let { grid ->
-                FloatArray(grid.size) { i ->
-                    var sum = 0f
-                    for (other in present) sum += other[i]
-                    grid[i] / (sum / present.size)
-                }
-            }
-        }
     }
 }
 

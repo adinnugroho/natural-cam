@@ -93,6 +93,20 @@ class LensShadingMap internal constructor(
         grids.contentDeepEquals(other.grids)
 
     override fun hashCode(): Int = ((columns * 31 + rows) * 31 + imageWidth) * 31 + imageHeight
+
+    /**
+     * Element-wise mean of the CFA-position grids: the shading gain at a point
+     * averaged over colour. Correcting the shading amplifies a pixel's noise by
+     * exactly this factor, so the denoiser scales its strength by it.
+     */
+    internal fun meanGrid(): FloatArray? {
+        val present = grids.filterNotNull()
+        if (present.isEmpty()) return null
+        val mean = FloatArray(present[0].size)
+        for (grid in present) for (i in mean.indices) mean[i] += grid[i]
+        for (i in mean.indices) mean[i] /= present.size
+        return mean
+    }
 }
 
 internal fun FloatArray?.contentEqualsNullable(other: FloatArray?): Boolean =

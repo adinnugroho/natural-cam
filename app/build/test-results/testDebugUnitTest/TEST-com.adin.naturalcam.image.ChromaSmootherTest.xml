@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.adin.naturalcam.image.ChromaSmootherTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-10-06T02:04:15.390Z" hostname="DESKTOP-5NKLUF6" time="0.006">
+  <properties/>
+  <testcase name="a map for another frame is ignored" classname="com.adin.naturalcam.image.ChromaSmootherTest" time="0.002"/>
+  <testcase name="luma is preserved exactly" classname="com.adin.naturalcam.image.ChromaSmootherTest" time="0.002"/>
+  <testcase name="chroma spread collapses where the shading amplified" classname="com.adin.naturalcam.image.ChromaSmootherTest" time="0.001"/>
+  <testcase name="a shading gain of one is an exact no-op" classname="com.adin.naturalcam.image.ChromaSmootherTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.adin.naturalcam.camera.camerax.OutputResolutionMappingTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-10-06T01:48:02.082Z" hostname="DESKTOP-5NKLUF6" time="0.007">
+<testsuite name="com.adin.naturalcam.camera.camerax.OutputResolutionMappingTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-10-06T02:04:14.979Z" hostname="DESKTOP-5NKLUF6" time="0.009">
   <properties/>
-  <testcase name="full maps to highest available resolution without forcing a frame ratio" classname="com.adin.naturalcam.camera.camerax.OutputResolutionMappingTest" time="0.005"/>
-  <testcase name="frame ratios map to fixed aspect strategies" classname="com.adin.naturalcam.camera.camerax.OutputResolutionMappingTest" time="0.001"/>
-  <testcase name="every domain aspect option has a mapping" classname="com.adin.naturalcam.camera.camerax.OutputResolutionMappingTest" time="0.001"/>
+  <testcase name="full maps to highest available resolution without forcing a frame ratio" classname="com.adin.naturalcam.camera.camerax.OutputResolutionMappingTest" time="0.007"/>
+  <testcase name="frame ratios map to fixed aspect strategies" classname="com.adin.naturalcam.camera.camerax.OutputResolutionMappingTest" time="0.0"/>
+  <testcase name="every domain aspect option has a mapping" classname="com.adin.naturalcam.camera.camerax.OutputResolutionMappingTest" time="0.0"/>
   <testcase name="maximum mode combines highest resolution with selected aspect" classname="com.adin.naturalcam.camera.camerax.OutputResolutionMappingTest" time="0.0"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>

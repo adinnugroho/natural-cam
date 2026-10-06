@@ -1,6 +1,7 @@
 package com.adin.naturalcam.image.processing
 
 import com.adin.naturalcam.image.core.CpuParallel
+import com.adin.naturalcam.image.core.LensShadingMap
 import com.adin.naturalcam.image.core.RgbImage
 import kotlin.math.abs
 import kotlin.math.floor
@@ -98,6 +99,141 @@ object NoiseReducer {
 
     private fun linearLuminance(r: Float, g: Float, b: Float): Float =
         0.2126f * r + 0.7152f * g + 0.0722f * b
+}
+
+/**
+ * Luma-preserving 3x3 binomial chroma smoothing, scaled by how much the
+ * lens-shading correction amplified a pixel's noise.
+ *
+ * Correcting the luminance vignette multiplies a pixel's signal *and its noise*
+ * by the shading gain — up to ~5x at the frame corner of this lens. The 2x2
+ * chroma filter above cannot absorb that: a 2x2 average leaves a block-periodic
+ * residual that measures *worse* at pixel scale than no filtering at all, so a
+ * stronger setting only trades noise for 2x2 colour blocking. A separable
+ * [1,2,1] kernel is smooth at pixel scale instead.
+ *
+ * Luma is carried through untouched (the blend moves only the chroma offsets),
+ * so nothing is softened. Strength per pixel is `1 - 1/gain`: at the frame
+ * centre, where the correction does nothing, the stage is an exact no-op, and
+ * where the correction amplified by `gain` the residual chroma noise returns to
+ * the centre's level. A fixed global smoothing would instead pay colour detail
+ * everywhere to fix a corner-only problem.
+ *
+ * Memory is O(width): the vertical pass runs over a rolling window of three
+ * horizontally-blurred rows rather than a full-frame scratch, because a 12 MP
+ * frame already occupies ~150 MB of the process heap (AGENTS 45).
+ */
+object ChromaSmoother {
+
+    /** Ceiling on the per-pixel strength; replacing chroma outright reads as a smear. */
+    const val MAX_STRENGTH = 0.85f
+
+    private const val LUMA_R = 0.2126f
+    private const val LUMA_G = 0.7152f
+    private const val LUMA_B = 0.0722f
+
+    fun apply(rgb: RgbImage, map: LensShadingMap): RgbImage {
+        if (map.imageWidth != rgb.width || map.imageHeight != rgb.height) return rgb
+        val grid = map.meanGrid() ?: return rgb
+        val width = rgb.width
+        val height = rgb.height
+        val columns = map.columns
+        val rows = map.rows
+
+        val scaleX = if (width <= 1) 0f else (columns - 1).toFloat() / (width - 1)
+        val columnLow = IntArray(width)
+        val columnHigh = IntArray(width)
+        val columnFrac = FloatArray(width)
+        for (x in 0 until width) {
+            val g = x * scaleX
+            val low = g.toInt().coerceIn(0, columns - 1)
+            val high = (low + 1).coerceAtMost(columns - 1)
+            columnLow[x] = low
+            columnHigh[x] = high
+            columnFrac[x] = if (high == low) 0f else g - low
+        }
+        val scaleY = if (height <= 1) 0f else (rows - 1).toFloat() / (height - 1)
+
+        val red = rgb.r
+        val green = rgb.g
+        val blue = rgb.b
+        // Three live horizontally-blurred rows, indexed by row % 3.
+        val ring = Array(3) { FloatArray(3 * width) }
+
+        fun blurRow(row: Int, slot: Int) {
+            val base = row * width
+            val destination = ring[slot]
+            for (channel in 0 until 3) {
+                val source = when (channel) {
+                    0 -> red
+                    1 -> green
+                    else -> blue
+                }
+                val offset = channel * width
+                for (x in 0 until width) {
+                    val left = source[base + if (x > 0) x - 1 else 0]
+                    val mid = source[base + x]
+                    val right = source[base + if (x < width - 1) x + 1 else width - 1]
+                    destination[offset + x] = (left + 2f * mid + right) * 0.25f
+                }
+            }
+        }
+
+        blurRow(0, 0)
+        blurRow(0, 2) // the row above the frame replicates row 0
+        for (y in 0 until height) {
+            val belowSlot = (y + 1) % 3
+            if (y + 1 < height) {
+                blurRow(y + 1, belowSlot)
+            } else {
+                // Past the last row: the bottom row replicates itself.
+                ring[(height - 1) % 3].copyInto(ring[belowSlot])
+            }
+
+            val rowAbove = ring[(y + 2) % 3]
+            val rowHere = ring[y % 3]
+            val rowBelow = ring[belowSlot]
+
+            val gy = y * scaleY
+            val gainRowLow = gy.toInt().coerceIn(0, rows - 1)
+            val gainRowHigh = (gainRowLow + 1).coerceAtMost(rows - 1)
+            val gainRowFrac = if (gainRowHigh == gainRowLow) 0f else gy - gainRowLow
+            val gainBaseLow = gainRowLow * columns
+            val gainBaseHigh = gainRowHigh * columns
+
+            val base = y * width
+            for (x in 0 until width) {
+                val low = columnLow[x]
+                val high = columnHigh[x]
+                val fracX = columnFrac[x]
+                val topLeft = grid[gainBaseLow + low]
+                val top = topLeft + (grid[gainBaseLow + high] - topLeft) * fracX
+                val bottomLeft = grid[gainBaseHigh + low]
+                val bottom = bottomLeft + (grid[gainBaseHigh + high] - bottomLeft) * fracX
+                val gain = top + (bottom - top) * gainRowFrac
+                if (gain <= 1f) continue
+
+                val index = base + x
+                val r = red[index]
+                val g = green[index]
+                val b = blue[index]
+                val luminance = LUMA_R * r + LUMA_G * g + LUMA_B * b
+
+                val blurredR = (rowAbove[x] + 2f * rowHere[x] + rowBelow[x]) * 0.25f
+                val blurredG = (rowAbove[width + x] + 2f * rowHere[width + x] + rowBelow[width + x]) * 0.25f
+                val blurredB =
+                    (rowAbove[2 * width + x] + 2f * rowHere[2 * width + x] + rowBelow[2 * width + x]) * 0.25f
+                val blurredLuminance = LUMA_R * blurredR + LUMA_G * blurredG + LUMA_B * blurredB
+
+                val strength = (1f - 1f / gain).coerceAtMost(MAX_STRENGTH)
+                val keep = 1f - strength
+                red[index] = luminance + keep * (r - luminance) + strength * (blurredR - blurredLuminance)
+                green[index] = luminance + keep * (g - luminance) + strength * (blurredG - blurredLuminance)
+                blue[index] = luminance + keep * (b - luminance) + strength * (blurredB - blurredLuminance)
+            }
+        }
+        return rgb
+    }
 }
 
 /**

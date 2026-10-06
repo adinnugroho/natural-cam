@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.adin.naturalcam.resolve.CapturePathResolverTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-10-06T01:48:03.353Z" hostname="DESKTOP-5NKLUF6" time="0.004">
+<testsuite name="com.adin.naturalcam.resolve.CapturePathResolverTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-10-06T02:04:16.160Z" hostname="DESKTOP-5NKLUF6" time="0.002">
   <properties/>
   <testcase name="system with raw and final keeps raw save on raw-capable camera" classname="com.adin.naturalcam.resolve.CapturePathResolverTest" time="0.0"/>
   <testcase name="isp request settles for minimal when off unsupported and says so" classname="com.adin.naturalcam.resolve.CapturePathResolverTest" time="0.0"/>
   <testcase name="system uses processed jpeg and records uncontrolled isp" classname="com.adin.naturalcam.resolve.CapturePathResolverTest" time="0.0"/>
-  <testcase name="natural falls back to jpeg with honest limitations when only jpeg remains" classname="com.adin.naturalcam.resolve.CapturePathResolverTest" time="0.001"/>
+  <testcase name="natural falls back to jpeg with honest limitations when only jpeg remains" classname="com.adin.naturalcam.resolve.CapturePathResolverTest" time="0.0"/>
   <testcase name="natural falls back to yuv when raw missing" classname="com.adin.naturalcam.resolve.CapturePathResolverTest" time="0.0"/>
-  <testcase name="pure uses minimal raw development" classname="com.adin.naturalcam.resolve.CapturePathResolverTest" time="0.001"/>
+  <testcase name="pure uses minimal raw development" classname="com.adin.naturalcam.resolve.CapturePathResolverTest" time="0.0"/>
   <testcase name="raw-only mode sets save raw" classname="com.adin.naturalcam.resolve.CapturePathResolverTest" time="0.0"/>
   <testcase name="natural prefers raw when available" classname="com.adin.naturalcam.resolve.CapturePathResolverTest" time="0.0"/>
   <system-out><![CDATA[]]></system-out>

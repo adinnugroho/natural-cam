@@ -3,6 +3,7 @@ package com.adin.naturalcam.image.core
 import com.adin.naturalcam.domain.ProcessingProfile
 import com.adin.naturalcam.image.processing.ColorTransformStage
 import com.adin.naturalcam.image.processing.ClippedHighlightNeutralizer
+import com.adin.naturalcam.image.processing.ChromaSmoother
 import com.adin.naturalcam.image.processing.ExposureProcessor
 import com.adin.naturalcam.image.processing.GamutMapper
 import com.adin.naturalcam.image.processing.GrainStage
@@ -33,11 +34,11 @@ interface ImagePipeline {
 }
 
 /**
- * Reference CPU pipeline, natural-v25 (SPEC 130):
- * normalize → lens-shading colour correction → metadata WB → calibration-selected
+ * Reference CPU pipeline, natural-v26 (SPEC 130):
+ * normalize → lens-shading correction → metadata WB → calibration-selected
  * color transform → residual neutral correction → clipped-highlight
  * neutralization → exposure → hue-preserving tone/roll-off → chroma denoise →
- * gamut → sRGB → encode.
+ * shading-scaled chroma smoothing → gamut → sRGB → encode.
  *
  * PURE/SYSTEM inputs take only the transformations required for a viewable
  * image (SPEC 131). YUV input arrives already color-rendered by the ISP, so
@@ -78,7 +79,7 @@ class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
         }
         rgb = ClippedHighlightNeutralizer.apply(rgb)
 
-        return finish(rgb, config, raw.metadata.orientationDegrees)
+        return finish(rgb, config, raw.metadata.orientationDegrees, raw.metadata.lensShading)
     }
 
     override fun processYuv(yuv: YuvImage, config: ProcessingConfiguration, orientationDegrees: Int): EncodedImage {
@@ -86,7 +87,12 @@ class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
         return finish(rgb, config, orientationDegrees)
     }
 
-    private fun finish(rgb: RgbImage, config: ProcessingConfiguration, orientationDegrees: Int): EncodedImage {
+    private fun finish(
+        rgb: RgbImage,
+        config: ProcessingConfiguration,
+        orientationDegrees: Int,
+        lensShading: LensShadingMap? = null,
+    ): EncodedImage {
         var out = rgb
         if (config.profile == ProcessingProfile.NATURAL) {
             val warmth = (config.tone.warmth + config.tone.temperature * 0.08f).coerceIn(-0.1f, 0.1f)
@@ -95,6 +101,9 @@ class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
             out = NaturalToneMapper.map(out, config.tone)
             out = HighlightRollOff.apply(out, config.tone.highlightRollOffStart, config.tone.highlightCompression)
             out = NoiseReducer.reduce(out, config.chromaDenoiseStrength, config.lumaDenoiseStrength)
+            // The shading correction multiplied this pixel's chroma noise by the
+            // shading gain; absorb exactly that much again. No-op at the centre.
+            if (lensShading != null) out = ChromaSmoother.apply(out, lensShading)
             out = Sharpener.sharpen(out, config.sharpenAmount, config.sharpenRadiusPx)
             out = StyleEngine.apply(out, config.style)
         }
