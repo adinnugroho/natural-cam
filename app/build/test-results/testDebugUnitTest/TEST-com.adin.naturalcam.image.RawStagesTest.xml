@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.adin.naturalcam.image.RawStagesTest" tests="12" skipped="0" failures="0" errors="0" timestamp="2026-10-06T02:04:15.731Z" hostname="DESKTOP-5NKLUF6" time="0.006">
+<testsuite name="com.adin.naturalcam.image.RawStagesTest" tests="12" skipped="0" failures="0" errors="0" timestamp="2026-10-06T03:36:58.331Z" hostname="DESKTOP-5NKLUF6" time="0.004">
   <properties/>
   <testcase name="demosaic preserves own channel and averages diagonals at known sites" classname="com.adin.naturalcam.image.RawStagesTest" time="0.001"/>
   <testcase name="white balance multiplies linear channels" classname="com.adin.naturalcam.image.RawStagesTest" time="0.0"/>
-  <testcase name="normalizer subtracts per color black level and keeps overexposure" classname="com.adin.naturalcam.image.RawStagesTest" time="0.001"/>
+  <testcase name="normalizer subtracts per color black level and keeps overexposure" classname="com.adin.naturalcam.image.RawStagesTest" time="0.0"/>
   <testcase name="color matrix factory inverts dng color matrix" classname="com.adin.naturalcam.image.RawStagesTest" time="0.0"/>
   <testcase name="camera color transformer applies row major matrix" classname="com.adin.naturalcam.image.RawStagesTest" time="0.0"/>
   <testcase name="calibration illuminant selects the matching matrix" classname="com.adin.naturalcam.image.RawStagesTest" time="0.001"/>
   <testcase name="as shot neutral maps to green normalized gains" classname="com.adin.naturalcam.image.RawStagesTest" time="0.0"/>
   <testcase name="cfa layouts map every 2x2 position" classname="com.adin.naturalcam.image.RawStagesTest" time="0.0"/>
   <testcase name="degenerate forward matrix falls back to color matrix" classname="com.adin.naturalcam.image.RawStagesTest" time="0.0"/>
-  <testcase name="color matrix factory prefers forward matrix" classname="com.adin.naturalcam.image.RawStagesTest" time="0.001"/>
+  <testcase name="color matrix factory prefers forward matrix" classname="com.adin.naturalcam.image.RawStagesTest" time="0.0"/>
   <testcase name="color matrix factory rejects metadata without matrices" classname="com.adin.naturalcam.image.RawStagesTest" time="0.001"/>
   <testcase name="demosaic reconstructs flat color exactly for every cfa layout" classname="com.adin.naturalcam.image.RawStagesTest" time="0.001"/>
   <system-out><![CDATA[]]></system-out>

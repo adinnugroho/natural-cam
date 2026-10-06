@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.adin.naturalcam.image.ImageRotationTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-10-06T02:04:15.399Z" hostname="DESKTOP-5NKLUF6" time="0.008">
+<testsuite name="com.adin.naturalcam.image.ImageRotationTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-10-06T03:36:57.969Z" hostname="DESKTOP-5NKLUF6" time="0.009">
   <properties/>
-  <testcase name="90 clockwise moves first row to last column" classname="com.adin.naturalcam.image.ImageRotationTest" time="0.005"/>
-  <testcase name="four quarter turns return to original" classname="com.adin.naturalcam.image.ImageRotationTest" time="0.0"/>
+  <testcase name="90 clockwise moves first row to last column" classname="com.adin.naturalcam.image.ImageRotationTest" time="0.006"/>
+  <testcase name="four quarter turns return to original" classname="com.adin.naturalcam.image.ImageRotationTest" time="0.001"/>
   <testcase name="negative degrees normalize clockwise" classname="com.adin.naturalcam.image.ImageRotationTest" time="0.0"/>
-  <testcase name="180 reverses both axes" classname="com.adin.naturalcam.image.ImageRotationTest" time="0.001"/>
+  <testcase name="180 reverses both axes" classname="com.adin.naturalcam.image.ImageRotationTest" time="0.0"/>
   <testcase name="zero and full turn are identity" classname="com.adin.naturalcam.image.ImageRotationTest" time="0.0"/>
-  <testcase name="270 clockwise moves last row to first column" classname="com.adin.naturalcam.image.ImageRotationTest" time="0.001"/>
+  <testcase name="270 clockwise moves last row to first column" classname="com.adin.naturalcam.image.ImageRotationTest" time="0.0"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

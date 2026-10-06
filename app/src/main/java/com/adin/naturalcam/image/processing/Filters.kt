@@ -102,26 +102,29 @@ object NoiseReducer {
 }
 
 /**
- * Luma-preserving 3x3 binomial chroma smoothing, scaled by how much the
- * lens-shading correction amplified a pixel's noise.
+ * Chroma smoothing for the noise the lens-shading correction amplifies, done on
+ * the half-resolution chroma plane the JPEG actually keeps.
  *
  * Correcting the luminance vignette multiplies a pixel's signal *and its noise*
- * by the shading gain — up to ~5x at the frame corner of this lens. The 2x2
- * chroma filter above cannot absorb that: a 2x2 average leaves a block-periodic
- * residual that measures *worse* at pixel scale than no filtering at all, so a
- * stronger setting only trades noise for 2x2 colour blocking. A separable
- * [1,2,1] kernel is smooth at pixel scale instead.
+ * by the shading gain — up to ~5x at the frame corner of this lens. Chroma is
+ * where that shows, and it is also the cheapest thing to clean: JPEG stores
+ * chroma 4:2:0 (verified on device — luma 2x2, chroma 1x1 sampling), so every
+ * capture already discards chroma detail below the 2x2 block. Filtering the
+ * chroma plane at that resolution removes noise we could not have delivered
+ * anyway, and costs a quarter of the pixels.
  *
- * Luma is carried through untouched (the blend moves only the chroma offsets),
- * so nothing is softened. Strength per pixel is `1 - 1/gain`: at the frame
- * centre, where the correction does nothing, the stage is an exact no-op, and
- * where the correction amplified by `gain` the residual chroma noise returns to
- * the centre's level. A fixed global smoothing would instead pay colour detail
- * everywhere to fix a corner-only problem.
+ * Luma is carried through untouched: the blend moves only the chroma offsets,
+ * and the luma it would have changed is subtracted back out, so the stage
+ * cannot soften anything. Strength per pixel is `1 - 1/gain`, so at the frame
+ * centre — where the correction does nothing — it is an exact no-op, and where
+ * the correction amplified by `gain` the residual chroma noise returns to the
+ * centre's level.
  *
- * Memory is O(width): the vertical pass runs over a rolling window of three
- * horizontally-blurred rows rather than a full-frame scratch, because a 12 MP
- * frame already occupies ~150 MB of the process heap (AGENTS 45).
+ * Every pass is parallel: the planes are small, the horizontal pass is
+ * row-independent, and the vertical pass reads one plane while writing another.
+ * The previous full-resolution version was the pipeline's only sequential
+ * stage, because a rolling three-row window was the only way to avoid a
+ * full-frame scratch.
  */
 object ChromaSmoother {
 
@@ -129,7 +132,6 @@ object ChromaSmoother {
     const val MAX_STRENGTH = 0.85f
 
     private const val LUMA_R = 0.2126f
-    private const val LUMA_G = 0.7152f
     private const val LUMA_B = 0.0722f
 
     fun apply(rgb: RgbImage, map: LensShadingMap): RgbImage {
@@ -145,91 +147,230 @@ object ChromaSmoother {
         val columnHigh = IntArray(width)
         val columnFrac = FloatArray(width)
         for (x in 0 until width) {
-            val g = x * scaleX
-            val low = g.toInt().coerceIn(0, columns - 1)
+            val gx = x * scaleX
+            val low = gx.toInt().coerceIn(0, columns - 1)
             val high = (low + 1).coerceAtMost(columns - 1)
             columnLow[x] = low
             columnHigh[x] = high
-            columnFrac[x] = if (high == low) 0f else g - low
+            columnFrac[x] = if (high == low) 0f else gx - low
         }
         val scaleY = if (height <= 1) 0f else (rows - 1).toFloat() / (height - 1)
 
+        val planeWidth = (width + 1) / 2
+        val planeHeight = (height + 1) / 2
         val red = rgb.r
         val green = rgb.g
         val blue = rgb.b
-        // Three live horizontally-blurred rows, indexed by row % 3.
-        val ring = Array(3) { FloatArray(3 * width) }
 
-        fun blurRow(row: Int, slot: Int) {
-            val base = row * width
-            val destination = ring[slot]
-            for (channel in 0 until 3) {
-                val source = when (channel) {
-                    0 -> red
-                    1 -> green
-                    else -> blue
-                }
-                val offset = channel * width
-                for (x in 0 until width) {
-                    val left = source[base + if (x > 0) x - 1 else 0]
-                    val mid = source[base + x]
-                    val right = source[base + if (x < width - 1) x + 1 else width - 1]
-                    destination[offset + x] = (left + 2f * mid + right) * 0.25f
+        // Pass 1: 2x2 average of R-G and B-G into the chroma planes.
+        val crPlane = FloatArray(planeWidth * planeHeight)
+        val cbPlane = FloatArray(planeWidth * planeHeight)
+        CpuParallel.forEach(planeHeight, minItemsPerTask = 64) { start, end ->
+            for (py in start until end) {
+                val top = py * 2 * width
+                val bottom = (py * 2 + 1).coerceAtMost(height - 1) * width
+                for (px in 0 until planeWidth) {
+                    val left = px * 2
+                    val right = (left + 1).coerceAtMost(width - 1)
+                    val r = (red[top + left] + red[top + right] + red[bottom + left] + red[bottom + right]) * 0.25f
+                    val g = (green[top + left] + green[top + right] + green[bottom + left] + green[bottom + right]) * 0.25f
+                    val b = (blue[top + left] + blue[top + right] + blue[bottom + left] + blue[bottom + right]) * 0.25f
+                    val i = py * planeWidth + px
+                    crPlane[i] = r - g
+                    cbPlane[i] = b - g
                 }
             }
         }
 
-        blurRow(0, 0)
-        blurRow(0, 2) // the row above the frame replicates row 0
-        for (y in 0 until height) {
-            val belowSlot = (y + 1) % 3
-            if (y + 1 < height) {
-                blurRow(y + 1, belowSlot)
-            } else {
-                // Past the last row: the bottom row replicates itself.
-                ring[(height - 1) % 3].copyInto(ring[belowSlot])
+        // Pass 2: separable [1,2,1] per plane.
+        val blurredCr = FloatArray(planeWidth * planeHeight)
+        val blurredCb = FloatArray(planeWidth * planeHeight)
+        horizontal121(crPlane, planeWidth, planeHeight)
+        vertical121(crPlane, blurredCr, planeWidth, planeHeight)
+        horizontal121(cbPlane, planeWidth, planeHeight)
+        vertical121(cbPlane, blurredCb, planeWidth, planeHeight)
+
+        // Pass 3: rebuild, keeping each pixel's own luma exactly.
+        CpuParallel.forEach(height, minItemsPerTask = 128) { startRow, endRow ->
+            for (y in startRow until endRow) {
+                val gy = y * scaleY
+                val gainRowLow = gy.toInt().coerceIn(0, rows - 1)
+                val gainRowHigh = (gainRowLow + 1).coerceAtMost(rows - 1)
+                val gainRowFrac = if (gainRowHigh == gainRowLow) 0f else gy - gainRowLow
+                val gainBaseLow = gainRowLow * columns
+                val gainBaseHigh = gainRowHigh * columns
+
+                val v = y * 0.5f
+                val planeRow = v.toInt().coerceIn(0, planeHeight - 1)
+                val planeRowNext = (planeRow + 1).coerceAtMost(planeHeight - 1)
+                val fracY = v - planeRow
+                val offHere = planeRow * planeWidth
+                val offNext = planeRowNext * planeWidth
+
+                val base = y * width
+                for (x in 0 until width) {
+                    val low = columnLow[x]
+                    val high = columnHigh[x]
+                    val fracX = columnFrac[x]
+                    val topLeft = grid[gainBaseLow + low]
+                    val top = topLeft + (grid[gainBaseLow + high] - topLeft) * fracX
+                    val bottomLeft = grid[gainBaseHigh + low]
+                    val bottom = bottomLeft + (grid[gainBaseHigh + high] - bottomLeft) * fracX
+                    val gain = top + (bottom - top) * gainRowFrac
+                    if (gain <= 1f) continue
+
+                    val u = x * 0.5f
+                    val planeColumn = u.toInt().coerceIn(0, planeWidth - 1)
+                    val planeColumnNext = (planeColumn + 1).coerceAtMost(planeWidth - 1)
+                    val fracU = u - planeColumn
+
+                    val targetR = sample(
+                        blurredCr[offHere + planeColumn], blurredCr[offHere + planeColumnNext],
+                        blurredCr[offNext + planeColumn], blurredCr[offNext + planeColumnNext],
+                        fracU, fracY,
+                    )
+                    val targetB = sample(
+                        blurredCb[offHere + planeColumn], blurredCb[offHere + planeColumnNext],
+                        blurredCb[offNext + planeColumn], blurredCb[offNext + planeColumnNext],
+                        fracU, fracY,
+                    )
+
+                    val index = base + x
+                    val r = red[index]
+                    val g = green[index]
+                    val b = blue[index]
+                    val strength = (1f - 1f / gain).coerceAtMost(MAX_STRENGTH)
+                    val deltaR = strength * (targetR - (r - g))
+                    val deltaB = strength * (targetB - (b - g))
+                    // Keep luma exact: the chroma move shifts it by this much, so
+                    // take it back off all three channels.
+                    val deltaLuma = LUMA_R * deltaR + LUMA_B * deltaB
+                    red[index] = r + deltaR - deltaLuma
+                    green[index] = g - deltaLuma
+                    blue[index] = b + deltaB - deltaLuma
+                }
             }
+        }
+        return rgb
+    }
 
-            val rowAbove = ring[(y + 2) % 3]
-            val rowHere = ring[y % 3]
-            val rowBelow = ring[belowSlot]
+    /** Horizontal [1,2,1], in place. Each row is independent, so this parallelizes. */
+    private fun horizontal121(plane: FloatArray, width: Int, height: Int) {
+        CpuParallel.forEach(height, minItemsPerTask = 64) { start, end ->
+            for (y in start until end) {
+                val row = y * width
+                var left = plane[row]
+                for (x in 0 until width) {
+                    val mid = plane[row + x]
+                    val right = plane[row + (x + 1).coerceAtMost(width - 1)]
+                    plane[row + x] = (left + 2f * mid + right) * 0.25f
+                    left = mid
+                }
+            }
+        }
+    }
 
-            val gy = y * scaleY
-            val gainRowLow = gy.toInt().coerceIn(0, rows - 1)
-            val gainRowHigh = (gainRowLow + 1).coerceAtMost(rows - 1)
-            val gainRowFrac = if (gainRowHigh == gainRowLow) 0f else gy - gainRowLow
-            val gainBaseLow = gainRowLow * columns
-            val gainBaseHigh = gainRowHigh * columns
+    /** Vertical [1,2,1] from [source] into [destination]; the buffers must differ. */
+    private fun vertical121(source: FloatArray, destination: FloatArray, width: Int, height: Int) {
+        CpuParallel.forEach(height, minItemsPerTask = 64) { start, end ->
+            for (y in start until end) {
+                val up = (y - 1).coerceAtLeast(0) * width
+                val mid = y * width
+                val down = (y + 1).coerceAtMost(height - 1) * width
+                for (x in 0 until width) {
+                    destination[mid + x] = (source[up + x] + 2f * source[mid + x] + source[down + x]) * 0.25f
+                }
+            }
+        }
+    }
 
-            val base = y * width
-            for (x in 0 until width) {
-                val low = columnLow[x]
-                val high = columnHigh[x]
-                val fracX = columnFrac[x]
-                val topLeft = grid[gainBaseLow + low]
-                val top = topLeft + (grid[gainBaseLow + high] - topLeft) * fracX
-                val bottomLeft = grid[gainBaseHigh + low]
-                val bottom = bottomLeft + (grid[gainBaseHigh + high] - bottomLeft) * fracX
-                val gain = top + (bottom - top) * gainRowFrac
-                if (gain <= 1f) continue
+    private fun sample(
+        topLeft: Float,
+        topRight: Float,
+        bottomLeft: Float,
+        bottomRight: Float,
+        fracX: Float,
+        fracY: Float,
+    ): Float {
+        val top = topLeft + (topRight - topLeft) * fracX
+        val bottom = bottomLeft + (bottomRight - bottomLeft) * fracX
+        return top + (bottom - top) * fracY
+    }
+}
 
-                val index = base + x
-                val r = red[index]
-                val g = green[index]
-                val b = blue[index]
-                val luminance = LUMA_R * r + LUMA_G * g + LUMA_B * b
+/**
+ * Smooth, luma-only denoising of the grain the shading correction amplifies.
+ *
+ * [NoiseReducer]'s 2x2 luma path is deliberately not used for this: a 2x2 block
+ * average is block-periodic, and a block grid measures *worse* at pixel scale
+ * than no filtering at all. Denoising through it and then sharpening left more
+ * flat-area noise (+48%) than either alone, which is why a separable [1,2,1]
+ * kernel is used instead.
+ *
+ * Only luminance moves: the same offset is added to all three channels, so R-G
+ * and B-G are preserved exactly and no colour is touched. It is meant to run
+ * before [Sharpener], whose coring then restores edge contrast without lifting
+ * the reduced grain back up.
+ *
+ * Memory is a single frame buffer: the blur is built in one plane, and the
+ * final pass reads that plane while writing the image itself. Each pixel owns
+ * its own update and reads nothing another pixel writes, so every pass
+ * parallelizes. Strength 0 is an exact no-op.
+ */
+object LumaDenoiser {
 
-                val blurredR = (rowAbove[x] + 2f * rowHere[x] + rowBelow[x]) * 0.25f
-                val blurredG = (rowAbove[width + x] + 2f * rowHere[width + x] + rowBelow[width + x]) * 0.25f
-                val blurredB =
-                    (rowAbove[2 * width + x] + 2f * rowHere[2 * width + x] + rowBelow[2 * width + x]) * 0.25f
-                val blurredLuminance = LUMA_R * blurredR + LUMA_G * blurredG + LUMA_B * blurredB
+    private const val LUMA_R = 0.2126f
+    private const val LUMA_G = 0.7152f
+    private const val LUMA_B = 0.0722f
 
-                val strength = (1f - 1f / gain).coerceAtMost(MAX_STRENGTH)
-                val keep = 1f - strength
-                red[index] = luminance + keep * (r - luminance) + strength * (blurredR - blurredLuminance)
-                green[index] = luminance + keep * (g - luminance) + strength * (blurredG - blurredLuminance)
-                blue[index] = luminance + keep * (b - luminance) + strength * (blurredB - blurredLuminance)
+    fun apply(rgb: RgbImage, strength: Float): RgbImage {
+        val amount = strength.coerceIn(0f, 1f)
+        if (amount == 0f) return rgb
+        val width = rgb.width
+        val height = rgb.height
+        val red = rgb.r
+        val green = rgb.g
+        val blue = rgb.b
+        val plane = FloatArray(width * height)
+
+        CpuParallel.forEach(height, minItemsPerTask = 128) { start, end ->
+            for (y in start until end) {
+                val base = y * width
+                for (x in 0 until width) {
+                    val i = base + x
+                    plane[i] = LUMA_R * red[i] + LUMA_G * green[i] + LUMA_B * blue[i]
+                }
+            }
+        }
+
+        // Horizontal [1,2,1] in place: rows are independent, so this parallelizes.
+        CpuParallel.forEach(height, minItemsPerTask = 128) { start, end ->
+            for (y in start until end) {
+                val row = y * width
+                var left = plane[row]
+                for (x in 0 until width) {
+                    val mid = plane[row + x]
+                    val right = plane[row + (x + 1).coerceAtMost(width - 1)]
+                    plane[row + x] = (left + 2f * mid + right) * 0.25f
+                    left = mid
+                }
+            }
+        }
+
+        CpuParallel.forEach(height, minItemsPerTask = 128) { start, end ->
+            for (y in start until end) {
+                val up = (y - 1).coerceAtLeast(0) * width
+                val mid = y * width
+                val down = (y + 1).coerceAtMost(height - 1) * width
+                for (x in 0 until width) {
+                    val i = mid + x
+                    val blurred = (plane[up + x] + 2f * plane[mid + x] + plane[down + x]) * 0.25f
+                    val luma = LUMA_R * red[i] + LUMA_G * green[i] + LUMA_B * blue[i]
+                    val delta = amount * (blurred - luma)
+                    red[i] += delta
+                    green[i] += delta
+                    blue[i] += delta
+                }
             }
         }
         return rgb
@@ -241,10 +382,23 @@ object ChromaSmoother {
  * amount clamped to 0.5 to make halos structurally hard to produce. The blur
  * is a separable [1,2,1]/4 two-pass filter (radius ≈ 1 px at the default).
  * Amount 0 is an exact no-op (AGENTS 27).
+ *
+ * The high-pass is *cored*: only detail above [NOISE_REJECT] times the image's
+ * own measured noise floor is boosted. Sharpening and luma noise occupy the same
+ * spatial band, so an uncored unsharp simply buys acutance and noise in equal
+ * measure — measured on a device DNG, +7% acutance cost +7% flat-area noise.
+ * Thresholding at the noise amplitude passes the edges and leaves the grain
+ * alone, which is the only way to get crisper without getting noisier.
  */
 object Sharpener {
 
     const val MAX_AMOUNT = 0.5f
+
+    /** Detail must exceed this multiple of the measured noise floor before it is boosted. */
+    const val NOISE_REJECT = 2f
+
+    /** Coarse-histogram ceiling for the residual; larger than this is scene edge, not noise. */
+    private const val FLOOR_CEILING = 0.25f
 
     fun sharpen(rgb: RgbImage, amount: Float, radiusPx: Float): RgbImage {
         val a = amount.coerceIn(0f, MAX_AMOUNT)
@@ -262,13 +416,46 @@ object Sharpener {
                 source = target
                 target = if (target === blurredA) blurredB else blurredA
             }
+            val cut = NOISE_REJECT * noiseFloor(channel, source)
             CpuParallel.forEach(n) { start, end ->
                 for (i in start until end) {
-                    channel[i] = channel[i] + a * (channel[i] - source[i])
+                    val detail = channel[i] - source[i]
+                    val magnitude = abs(detail) - cut
+                    if (magnitude > 0f) {
+                        channel[i] += if (detail < 0f) -a * magnitude else a * magnitude
+                    }
                 }
             }
         }
         return rgb
+    }
+
+    /**
+     * Noise amplitude of the high-frequency residual, as a histogram median over
+     * a subsample. A median rather than a mean because scene edges drag the mean
+     * towards the picture instead of the grain.
+     */
+    private fun noiseFloor(channel: FloatArray, blurred: FloatArray): Float {
+        val bins = 256
+        val histogram = IntArray(bins)
+        var count = 0
+        var i = 0
+        while (i < channel.size) {
+            val bin = (abs(channel[i] - blurred[i]) * bins / FLOOR_CEILING).toInt()
+            if (bin < bins) {
+                histogram[bin]++
+                count++
+            }
+            i += 4
+        }
+        if (count == 0) return 0f
+        val target = count / 2
+        var running = 0
+        for (b in 0 until bins) {
+            running += histogram[b]
+            if (running >= target) return (b + 0.5f) * FLOOR_CEILING / bins
+        }
+        return 0f
     }
 }
 

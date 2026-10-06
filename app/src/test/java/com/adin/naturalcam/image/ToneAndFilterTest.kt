@@ -1,7 +1,11 @@
 package com.adin.naturalcam.image
 
+import com.adin.naturalcam.domain.ProcessingProfile
+import com.adin.naturalcam.image.core.ProcessingConfiguration
 import com.adin.naturalcam.image.core.RgbImage
+import com.adin.naturalcam.image.core.TEMPERATURE_WARMTH_SPAN
 import com.adin.naturalcam.image.core.ToneConfig
+import com.adin.naturalcam.image.core.naturalWarmth
 import com.adin.naturalcam.image.processing.ClippedHighlightNeutralizer
 import com.adin.naturalcam.image.processing.BloomStage
 
@@ -17,6 +21,7 @@ import com.adin.naturalcam.image.processing.WhiteBalanceStage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
 
 class ToneAndFilterTest {
 
@@ -519,5 +524,76 @@ class ToneAndFilterTest {
             val b = pixel and 0xFF
             assertTrue(r in 0..255 && g in 0..255 && b in 0..255)
         }
+    }
+
+    @Test
+    fun `temperature spans the whole slider without clipping`() {
+        val neutral = ToneConfig()
+        // A clamped warm end would be dead travel at the top of the slider.
+        assertEquals(
+            neutral.warmth + TEMPERATURE_WARMTH_SPAN,
+            naturalWarmth(neutral.copy(temperature = 1f)),
+            1e-6f,
+        )
+        assertTrue(naturalWarmth(neutral.copy(temperature = -1f)) < 0f)
+    }
+
+    @Test
+    fun `temperature moves the red blue balance in both directions`() {
+        val default = naturalWarmth(ToneConfig())
+        val warm = naturalWarmth(ToneConfig(temperature = 1f))
+        val cool = naturalWarmth(ToneConfig(temperature = -1f))
+        assertTrue(warm > default)
+        assertTrue(cool < default)
+        // Applied as (1 + w) red against (1 - w) blue: the warm end has to be a
+        // swing big enough to notice, not the old +9%/-9%.
+        assertTrue((1f + warm) / (1f - warm) > 1.4f)
+        assertTrue((1f - cool) / (1f + cool) > 1.2f)
+    }
+
+    @Test
+    fun `pure and system carry no recipe warmth`() {
+        assertEquals(0f, ProcessingConfiguration.forProfile(ProcessingProfile.PURE).tone.warmth, 0f)
+        assertEquals(0f, ProcessingConfiguration.forProfile(ProcessingProfile.SYSTEM).tone.warmth, 0f)
+        assertTrue(ProcessingConfiguration.forProfile(ProcessingProfile.NATURAL).tone.warmth > 0f)
+    }
+
+    @Test
+    fun `sharpener lifts structure and leaves the noise floor alone`() {
+        val size = 32
+        val rgb = RgbImage(size, size)
+        var seed = 99L
+        val before = FloatArray(size * size)
+        for (y in 0 until size) {
+            for (x in 0 until size) {
+                seed = (seed * 1103515245 + 12345) and 0x7FFFFFFF
+                val grain = ((seed % 1000) / 500f - 1f) * 0.0005f
+                val value = (if (x < size / 2) 0.2f else 0.8f) + grain
+                val i = y * size + x
+                rgb.r[i] = value
+                rgb.g[i] = value
+                rgb.b[i] = value
+                before[i] = value
+            }
+        }
+
+        Sharpener.sharpen(rgb, 0.3f, 1f)
+
+        val y = 8
+        val base = y * size
+        // Structure: the step either side of the edge under- and over-shoots.
+        assertTrue("no undershoot", rgb.r[base + 15] < before[base + 15] - 0.01f)
+        assertTrue("no overshoot", rgb.r[base + 16] > before[base + 16] + 0.01f)
+        val edgeChange = (rgb.r[base + 16] - rgb.r[base + 15]) - (before[base + 16] - before[base + 15])
+
+        // Grain: pixels away from the edge, where the high-pass is pure noise.
+        var quietChange = 0f
+        for (row in 0 until size) {
+            for (x in 4 until 12) {
+                val i = row * size + x
+                quietChange = maxOf(quietChange, abs(rgb.r[i] - before[i]))
+            }
+        }
+        assertTrue("coring let grain through: $quietChange vs edge $edgeChange", quietChange < 0.1f * edgeChange)
     }
 }

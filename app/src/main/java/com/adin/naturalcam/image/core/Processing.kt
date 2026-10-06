@@ -7,6 +7,24 @@ import com.adin.naturalcam.domain.StyleState
 internal const val NATURAL_CHROMA_DENOISE_STRENGTH = 0.18f
 
 /**
+ * Capture sharpening for NATURAL. The stage is cored against the image's own
+ * noise floor, so the amount buys edge acutance without lifting flat-area
+ * grain; this is well under the 0.5 ceiling that keeps halos structurally hard.
+ */
+internal const val NATURAL_SHARPEN_AMOUNT = 0.2f
+
+/**
+ * Smooth luma-only denoise for NATURAL. **Off by default**: built and measured,
+ * but it did not survive the numbers. The grain that reads as "RGB noise" is
+ * mostly chroma (about 2.7x the common-mode luma residual), which a luma-only
+ * filter cannot touch, so this buys little while costing 25-35% of the 1-px
+ * detail contrast, and smoothing a smooth gradient makes the 8-bit output
+ * contour into visible bands. [NATURAL_SHARPEN_AMOUNT]'s cored sharpen is the
+ * half of the idea that worked. Raise this only with a dither or a wider kernel.
+ */
+internal const val NATURAL_LUMA_SMOOTH_STRENGTH = 0f
+
+/**
  * Style-chain cleanup, scaled by style strength: the style workspace is a
  * creative layer, so it starts from a slightly cleaner base before bloom and
  * grain are added. Chroma is treated more strongly than luminance (AGENTS 26)
@@ -34,6 +52,33 @@ internal const val SATURATION_RANGE = 0.6f
 internal const val SATURATION_CHROMA_DENOISE = 1.0f
 
 /**
+ * Red/blue balance the temperature control contributes per unit of its -1..+1
+ * range. The slider spans the whole range, so this sets its authority: at +1
+ * the image is (1 + span) red against (1 - span) blue, and at -1 the reverse.
+ * The previous 0.08 topped out at +9% red / -9% blue, which reads as "cranked
+ * to max and still cold"; 0.20 was measured as still short of the ends a user
+ * expects, so it carries a little further in both directions.
+ */
+internal const val TEMPERATURE_WARMTH_SPAN = 0.32f
+
+/**
+ * Ceiling on the combined NATURAL warmth, set just above base + span so the
+ * slider never has a dead zone at the end of its travel. Past this the
+ * red/blue balance stops reading as light and starts reading as a colour cast.
+ */
+internal const val MAX_NATURAL_WARMTH = 0.38f
+
+/**
+ * Red/blue balance NATURAL actually applies, from the recipe's own warmth plus
+ * the user's temperature. Extracted so the "no dead zone at the end of the
+ * slider" invariant is testable rather than implied by two constants that must
+ * stay in step.
+ */
+internal fun naturalWarmth(tone: ToneConfig): Float =
+    (tone.warmth + tone.temperature * TEMPERATURE_WARMTH_SPAN)
+        .coerceIn(-MAX_NATURAL_WARMTH, MAX_NATURAL_WARMTH)
+
+/**
  * Explicit, centralized tuning parameters (AGENTS 64). MVP values are the
  * restrained starting points from SPEC 130; they are empirical placeholders
  * until real-device evaluation (AGENTS 63) — see LIMITATIONS.md.
@@ -53,8 +98,12 @@ data class ToneConfig(
     val highlightRollOffStart: Float = 0.75f,
     /** Minimal shoulder preserves highlight contrast without a washed/faded look. */
     val highlightCompression: Float = 0.03f,
-    /** Very small NATURAL-only red/blue balance toward warmth; zero keeps neutral rendering. */
-    val warmth: Float = 0.01f,
+    /**
+     * NATURAL's own red/blue balance toward warmth, independent of the user's
+     * temperature. Sized to read as natural morning/evening light rather than a
+     * cast; zero keeps neutral rendering.
+     */
+    val warmth: Float = 0.05f,
     /** User temperature adjustment; negative cools, positive warms, normalized [-1, 1]. */
     val temperature: Float = 0f,
 )
@@ -68,13 +117,18 @@ data class ProcessingConfiguration(
     /** NATURAL-v13 preserves luminance grain; only chroma denoise is enabled. */
     val chromaDenoiseStrength: Float = 0f,
     val lumaDenoiseStrength: Float = 0f,
-    /** NATURAL-v13 avoids full-frame unsharp masking on the capture path. */
+    /**
+     * Smooth 3x3 luma-only denoise. Separate from [lumaDenoiseStrength], whose
+     * 2x2 kernel is block-periodic and only survives in the style chain.
+     */
+    val lumaSmoothStrength: Float = 0f,
+    /** Cored capture sharpening; see [Sharpener] for why the amount stays low. */
     val sharpenAmount: Float = 0f,
     val sharpenRadiusPx: Float = 1.0f,
     val jpegQuality: Int = 92,
 ) {
     companion object {
-        const val PIPELINE_VERSION = "natural-v26"
+        const val PIPELINE_VERSION = "natural-v30"
 
         fun forProfile(
             profile: ProcessingProfile,
@@ -90,13 +144,16 @@ data class ProcessingConfiguration(
                     style = style,
                     jpegQuality = jpegQuality,
                     chromaDenoiseStrength = NATURAL_CHROMA_DENOISE_STRENGTH,
+                    lumaSmoothStrength = NATURAL_LUMA_SMOOTH_STRENGTH,
+                    sharpenAmount = NATURAL_SHARPEN_AMOUNT,
+                    sharpenRadiusPx = 1f,
                 )
                 // PURE: only what is required for a viewable image (SPEC 131).
                 ProcessingProfile.PURE -> ProcessingConfiguration(
                     profile = profile,
                     pipelineVersion = "pure-v2",
-                    // Explicit: PURE never takes the NATURAL recipe lift.
-                    tone = ToneConfig(exposureStops = 0f, contrast = 0f, highlightCompression = 0f),
+                    // Explicit: PURE never takes the NATURAL recipe lift or its warmth.
+                    tone = ToneConfig(exposureStops = 0f, contrast = 0f, highlightCompression = 0f, warmth = 0f),
                     chromaDenoiseStrength = 0f,
                     lumaDenoiseStrength = 0f,
                     sharpenAmount = 0f,
@@ -106,8 +163,8 @@ data class ProcessingConfiguration(
                 ProcessingProfile.SYSTEM -> ProcessingConfiguration(
                     profile = profile,
                     pipelineVersion = "system-passthrough",
-                    // Explicit: SYSTEM never takes the NATURAL recipe lift.
-                    tone = ToneConfig(exposureStops = 0f, contrast = 0f, highlightCompression = 0f),
+                    // Explicit: SYSTEM never takes the NATURAL recipe lift or its warmth.
+                    tone = ToneConfig(exposureStops = 0f, contrast = 0f, highlightCompression = 0f, warmth = 0f),
                     chromaDenoiseStrength = 0f,
                     lumaDenoiseStrength = 0f,
                     sharpenAmount = 0f,

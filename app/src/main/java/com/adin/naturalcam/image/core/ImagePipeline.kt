@@ -9,6 +9,7 @@ import com.adin.naturalcam.image.processing.GamutMapper
 import com.adin.naturalcam.image.processing.GrainStage
 import com.adin.naturalcam.image.processing.HighlightRollOff
 import com.adin.naturalcam.image.processing.ImageRotation
+import com.adin.naturalcam.image.processing.LumaDenoiser
 import com.adin.naturalcam.image.processing.NaturalToneMapper
 import com.adin.naturalcam.image.processing.NoiseReducer
 import com.adin.naturalcam.image.processing.OutputTransformer
@@ -95,7 +96,7 @@ class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
     ): EncodedImage {
         var out = rgb
         if (config.profile == ProcessingProfile.NATURAL) {
-            val warmth = (config.tone.warmth + config.tone.temperature * 0.08f).coerceIn(-0.1f, 0.1f)
+            val warmth = naturalWarmth(config.tone)
             out = WhiteBalanceStage.apply(out, RgbGains(1f + warmth, 1f, 1f - warmth))
             out = ExposureProcessor.apply(out, config.tone.exposureStops)
             out = NaturalToneMapper.map(out, config.tone)
@@ -104,6 +105,9 @@ class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
             // The shading correction multiplied this pixel's chroma noise by the
             // shading gain; absorb exactly that much again. No-op at the centre.
             if (lensShading != null) out = ChromaSmoother.apply(out, lensShading)
+            // Smooth luma denoise first, then the cored sharpen restores edge
+            // contrast without lifting the grain back up.
+            out = LumaDenoiser.apply(out, config.lumaSmoothStrength)
             out = Sharpener.sharpen(out, config.sharpenAmount, config.sharpenRadiusPx)
             out = StyleEngine.apply(out, config.style)
         }
