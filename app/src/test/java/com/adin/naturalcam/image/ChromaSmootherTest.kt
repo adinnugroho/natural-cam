@@ -73,6 +73,19 @@ class ChromaSmootherTest {
     }
 
     @Test
+    fun `a base strength denoises chroma even where the shading did nothing`() {
+        val image = checkerboard(8)
+        val lumaBefore = FloatArray(64) { luma(image.r[it], image.g[it], image.b[it]) }
+        val before = spread(image)
+        // A gain-1 map means the shading term is zero everywhere, so only the base acts.
+        ChromaSmoother.apply(image, map(1f, 8), baseStrength = 0.7f)
+        assertTrue("chroma spread ${spread(image)} not below $before", spread(image) < before * 0.6f)
+        for (i in 0 until 64) {
+            assertTrue(kotlin.math.abs(lumaBefore[i] - luma(image.r[i], image.g[i], image.b[i])) < 1e-6f)
+        }
+    }
+
+    @Test
     fun `a map for another frame is ignored`() {
         val image = checkerboard(8)
         val before = image.r.copyOf()

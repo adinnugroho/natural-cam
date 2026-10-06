@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.adin.naturalcam.image.raw.DngReaderTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-10-06T03:36:58.462Z" hostname="DESKTOP-5NKLUF6" time="0.036">
+<testsuite name="com.adin.naturalcam.image.raw.DngReaderTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-10-06T11:24:49.425Z" hostname="DESKTOP-5NKLUF6" time="0.045">
   <properties/>
-  <testcase name="rejects non tiff data" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.003"/>
-  <testcase name="reads all four cfa layouts with correct channel mapping" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.014"/>
-  <testcase name="black level canonicalized to per color" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.005"/>
-  <testcase name="tolerates exotic and unknown tag types from real producers" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.006"/>
-  <testcase name="as shot neutral and matrices preserved" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.003"/>
-  <testcase name="pixel values preserved end to end" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.003"/>
+  <testcase name="rejects non tiff data" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.004"/>
+  <testcase name="reads all four cfa layouts with correct channel mapping" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.019"/>
+  <testcase name="black level canonicalized to per color" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.007"/>
+  <testcase name="tolerates exotic and unknown tag types from real producers" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.005"/>
+  <testcase name="as shot neutral and matrices preserved" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.005"/>
+  <testcase name="pixel values preserved end to end" classname="com.adin.naturalcam.image.raw.DngReaderTest" time="0.005"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

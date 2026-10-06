@@ -3,8 +3,28 @@ package com.adin.naturalcam.image.core
 import com.adin.naturalcam.domain.ProcessingProfile
 import com.adin.naturalcam.domain.StyleState
 
-/** Mild chroma-only cleanup; luminance grain remains untouched. */
-internal const val NATURAL_CHROMA_DENOISE_STRENGTH = 0.18f
+/**
+ * Baseline strength of the half-resolution chroma smoother in NATURAL — the value
+ * for a *clean* frame. [MAX_CHROMA_SMOOTH_STRENGTH] is where a noisy one lands.
+ */
+internal const val NATURAL_CHROMA_SMOOTH_STRENGTH = 0.45f
+
+/**
+ * Adaptive denoise (see `NoiseEstimator.shadowGrain`). A fixed strength is wrong
+ * at both ends: it softens a clean frame for nothing and under-serves a dim one.
+ * These are the grain values at which a frame counts as clean, and as noisy as
+ * it gets; between them the smoothing scales linearly.
+ */
+internal const val GRAIN_CLEAN = 0.0050f
+internal const val GRAIN_NOISY = 0.0140f
+
+/** Smoothing at the noisy end. The clean end is each profile's own configured value. */
+internal const val MAX_CHROMA_SMOOTH_STRENGTH = 0.85f
+internal const val MAX_LUMA_SMOOTH_STRENGTH = 0.55f
+
+/** 0 for a clean frame, 1 at [GRAIN_NOISY] or beyond. */
+internal fun grainLevel(grain: Float): Float =
+    ((grain - GRAIN_CLEAN) / (GRAIN_NOISY - GRAIN_CLEAN)).coerceIn(0f, 1f)
 
 /**
  * Capture sharpening for NATURAL. The stage is cored against the image's own
@@ -14,24 +34,24 @@ internal const val NATURAL_CHROMA_DENOISE_STRENGTH = 0.18f
 internal const val NATURAL_SHARPEN_AMOUNT = 0.2f
 
 /**
- * Smooth luma-only denoise for NATURAL. **Off by default**: built and measured,
- * but it did not survive the numbers. The grain that reads as "RGB noise" is
- * mostly chroma (about 2.7x the common-mode luma residual), which a luma-only
- * filter cannot touch, so this buys little while costing 25-35% of the 1-px
- * detail contrast, and smoothing a smooth gradient makes the 8-bit output
- * contour into visible bands. [NATURAL_SHARPEN_AMOUNT]'s cored sharpen is the
- * half of the idea that worked. Raise this only with a dither or a wider kernel.
+ * Smooth luma-only denoise for NATURAL, applied before the cored sharpener.
+ *
+ * This replaces the style chain's 2x2 luma pass, which v32 removed outright —
+ * and removing it was a regression: on the same desk scene, dark-pixel luma
+ * noise went 4.23 to 5.96. At 0.5 the trade is not worth taking (25-35% of the
+ * 1-px detail for grain the filter only partly reaches) and it contours smooth
+ * gradients, but at 0.2 it recovers what the 2x2 pass was achieving without
+ * leaving a block grid behind.
  */
-internal const val NATURAL_LUMA_SMOOTH_STRENGTH = 0f
+internal const val NATURAL_LUMA_SMOOTH_STRENGTH = 0.08f
 
 /**
- * Style-chain cleanup, scaled by style strength: the style workspace is a
+ * Style-chain chroma cleanup, scaled by style strength: the style workspace is a
  * creative layer, so it starts from a slightly cleaner base before bloom and
- * grain are added. Chroma is treated more strongly than luminance (AGENTS 26)
- * to keep real texture and avoid waxy rendering.
+ * grain are added. Chroma only — luminance texture belongs to the base chain, so
+ * a styled capture cannot go waxy.
  */
 internal const val STYLE_CHROMA_DENOISE_STRENGTH = 0.6f
-internal const val STYLE_LUMA_DENOISE_STRENGTH = 0.20f
 
 /**
  * Chroma multiplier span of the style Saturation control: the slider's -1..+1 maps
@@ -88,10 +108,23 @@ data class ToneConfig(
      * NATURAL recipe exposure lift in stops, applied in linear light inside the
      * pipeline. This is a fixed part of the NATURAL look, independent of the
      * camera EV control the user drives from the shutter bar.
+     *
+     * Was 1.5, which had no headroom: on a real frame it put 1.30% of pixels
+     * within 15 levels of white (against 0.02% for a plain development) and the
+     * 99th percentile at 243/255, while squeezing the blacks out. A highlight
+     * shoulder cannot recover that — measured, raising it moved near-white from
+     * 1.30% to only 1.26%. Halving the lift spread the range and cut near-white
+     * to 0.03% while staying brighter than no lift at all.
      */
-    val exposureStops: Float = 1.5f,
-    /** Above-unity toe exponent keeps shadows deeper while the lift restores overall brightness. */
-    val midtoneGamma: Float = 1.04f,
+    val exposureStops: Float = 0.75f,
+    /**
+     * Sub-pivot tone exponent: everything below mid-gray is raised to this power.
+     * Above 1 it deepens the shadows, which is what puts real blacks back after the
+     * exposure lift. At 1.04 the near-blacks sat at 0.83% of pixels against 1.97%
+     * for a plain development; 1.20 matches that (2.22%) while keeping the frame
+     * ~22% brighter overall, and the highlight end is untouched (p95 unchanged).
+     */
+    val midtoneGamma: Float = 1.20f,
     /** Slightly stronger global contrast keeps the lifted image from looking faded. */
     val contrast: Float = 0.05f,
     /** Linear level where highlight shoulder starts. */
@@ -116,6 +149,8 @@ data class ProcessingConfiguration(
     val style: StyleState = StyleState(),
     /** NATURAL-v13 preserves luminance grain; only chroma denoise is enabled. */
     val chromaDenoiseStrength: Float = 0f,
+    /** Base strength for the half-resolution chroma smoother; the shading gain adds to it. */
+    val chromaSmoothStrength: Float = 0f,
     val lumaDenoiseStrength: Float = 0f,
     /**
      * Smooth 3x3 luma-only denoise. Separate from [lumaDenoiseStrength], whose
@@ -128,7 +163,7 @@ data class ProcessingConfiguration(
     val jpegQuality: Int = 92,
 ) {
     companion object {
-        const val PIPELINE_VERSION = "natural-v30"
+        const val PIPELINE_VERSION = "natural-v37"
 
         fun forProfile(
             profile: ProcessingProfile,
@@ -143,7 +178,7 @@ data class ProcessingConfiguration(
                     tone = ToneConfig(temperature = temperature.coerceIn(-1f, 1f)),
                     style = style,
                     jpegQuality = jpegQuality,
-                    chromaDenoiseStrength = NATURAL_CHROMA_DENOISE_STRENGTH,
+                    chromaSmoothStrength = NATURAL_CHROMA_SMOOTH_STRENGTH,
                     lumaSmoothStrength = NATURAL_LUMA_SMOOTH_STRENGTH,
                     sharpenAmount = NATURAL_SHARPEN_AMOUNT,
                     sharpenRadiusPx = 1f,

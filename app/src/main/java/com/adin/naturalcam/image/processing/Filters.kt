@@ -5,6 +5,7 @@ import com.adin.naturalcam.image.core.LensShadingMap
 import com.adin.naturalcam.image.core.RgbImage
 import kotlin.math.abs
 import kotlin.math.floor
+import kotlin.math.pow
 /**
  * Restrained 2×2 chroma denoising. Each pixel keeps its own linear luminance;
  * only color differences are blended toward the block mean. Real luminance
@@ -134,13 +135,14 @@ object ChromaSmoother {
     private const val LUMA_R = 0.2126f
     private const val LUMA_B = 0.0722f
 
-    fun apply(rgb: RgbImage, map: LensShadingMap): RgbImage {
-        if (map.imageWidth != rgb.width || map.imageHeight != rgb.height) return rgb
-        val grid = map.meanGrid() ?: return rgb
+    fun apply(rgb: RgbImage, map: LensShadingMap?, baseStrength: Float = 0f): RgbImage {
+        if (map != null && (map.imageWidth != rgb.width || map.imageHeight != rgb.height)) return rgb
+        val grid = map?.meanGrid()
+        if (grid == null && baseStrength <= 0f) return rgb
         val width = rgb.width
         val height = rgb.height
-        val columns = map.columns
-        val rows = map.rows
+        val columns = map?.columns ?: 1
+        val rows = map?.rows ?: 1
 
         val scaleX = if (width <= 1) 0f else (columns - 1).toFloat() / (width - 1)
         val columnLow = IntArray(width)
@@ -209,15 +211,25 @@ object ChromaSmoother {
 
                 val base = y * width
                 for (x in 0 until width) {
-                    val low = columnLow[x]
-                    val high = columnHigh[x]
-                    val fracX = columnFrac[x]
-                    val topLeft = grid[gainBaseLow + low]
-                    val top = topLeft + (grid[gainBaseLow + high] - topLeft) * fracX
-                    val bottomLeft = grid[gainBaseHigh + low]
-                    val bottom = bottomLeft + (grid[gainBaseHigh + high] - bottomLeft) * fracX
-                    val gain = top + (bottom - top) * gainRowFrac
-                    if (gain <= 1f) continue
+                    val gain = if (grid == null) {
+                        1f
+                    } else {
+                        val low = columnLow[x]
+                        val high = columnHigh[x]
+                        val fracX = columnFrac[x]
+                        val topLeft = grid[gainBaseLow + low]
+                        val top = topLeft + (grid[gainBaseLow + high] - topLeft) * fracX
+                        val bottomLeft = grid[gainBaseHigh + low]
+                        val bottom = bottomLeft + (grid[gainBaseHigh + high] - bottomLeft) * fracX
+                        top + (bottom - top) * gainRowFrac
+                    }
+                    // Base strength covers the sensor's own chroma noise anywhere in
+                    // the frame; the shading term adds back what the correction
+                    // amplified. Without a base, the centre of the frame — where the
+                    // gain is 1 — gets no effective chroma denoise at all.
+                    val shading = if (gain > 1f) 1f - 1f / gain else 0f
+                    val strength = (baseStrength + shading).coerceIn(0f, MAX_STRENGTH)
+                    if (strength <= 0f) continue
 
                     val u = x * 0.5f
                     val planeColumn = u.toInt().coerceIn(0, planeWidth - 1)
@@ -239,7 +251,6 @@ object ChromaSmoother {
                     val r = red[index]
                     val g = green[index]
                     val b = blue[index]
-                    val strength = (1f - 1f / gain).coerceAtMost(MAX_STRENGTH)
                     val deltaR = strength * (targetR - (r - g))
                     val deltaB = strength * (targetB - (b - g))
                     // Keep luma exact: the chroma move shifts it by this much, so
@@ -296,6 +307,116 @@ object ChromaSmoother {
         val bottom = bottomLeft + (bottomRight - bottomLeft) * fracX
         return top + (bottom - top) * fracY
     }
+}
+
+/**
+ * Estimates how grainy a frame is, so the denoise can be scaled to it.
+ *
+ * A fixed denoise strength is wrong in both directions at once: it softens a
+ * clean, bright frame for nothing, and it is too weak for a dim one where sensor
+ * gain has lifted the grain. Single-frame denoising cannot escape the
+ * noise-versus-detail trade, but it can spend that trade only where the frame
+ * needs it.
+ *
+ * The measurement is taken in the *delivered* domain, not in linear light. Linear
+ * grain is what the sensor produced, but not what you see: the output transfer
+ * curve expands the shadows, so the same absolute noise is far more visible
+ * there. Reading it linearly made a dim indoor frame look cleaner than a bright
+ * daylight one, which is exactly backwards. Both the median gate and the
+ * high-pass therefore run on sRGB-encoded values.
+ *
+ * Grain is then measured where noise is least confusable with detail: the
+ * high-pass amplitude over the *darker half* of the frame, where shadow detail is
+ * sparse and what is left is mostly sensor noise. Everything runs on a 1-in-4
+ * subsample in two cheap passes over a precomputed transfer curve, so the
+ * estimate costs no measurable time.
+ */
+object NoiseEstimator {
+
+    private const val STEP = 4
+    private const val BINS = 256
+
+    /** Roughly the standard deviation of the horizontal high-pass for white noise. */
+    private const val HIGH_PASS_GAIN = 1.22f
+
+    /** Curve resolution; the transfer is precomputed once into [transfer]. */
+    private const val LUT_SIZE = 4096
+
+    private val transfer = FloatArray(LUT_SIZE + 1) { index ->
+        val linear = index.toFloat() / LUT_SIZE
+        if (linear <= 0.0031308f) linear * 12.92f else 1.055f * linear.pow(1f / 2.4f) - 0.055f
+    }.also { table -> table[LUT_SIZE] = 1f }
+
+    /** sRGB output transfer, matching `OutputTransformer`. */
+    private fun encode(linear: Float): Float {
+        val scaled = linear * LUT_SIZE
+        if (scaled <= 0f) return 0f
+        if (scaled >= LUT_SIZE) return 1f
+        val index = scaled.toInt()
+        val fraction = scaled - index
+        return transfer[index] + (transfer[index + 1] - transfer[index]) * fraction
+    }
+
+    fun shadowGrain(rgb: RgbImage): Float {
+        val width = rgb.width
+        val height = rgb.height
+        if (width < 3 || height < 3) return 0f
+        val red = rgb.r
+        val green = rgb.g
+        val blue = rgb.b
+
+        val histogram = IntArray(BINS)
+        var count = 0
+        var y = 1
+        while (y < height - 1) {
+            var x = 1
+            while (x < width - 1) {
+                val encoded = encode(lumaAt(red, green, blue, y * width + x))
+                val bin = (encoded * BINS).toInt()
+                if (bin in 0 until BINS) {
+                    histogram[bin]++
+                    count++
+                }
+                x += STEP
+            }
+            y += STEP
+        }
+        if (count == 0) return 0f
+        var running = 0
+        var medianBin = 0
+        for (bin in 0 until BINS) {
+            running += histogram[bin]
+            if (running * 2 >= count) {
+                medianBin = bin
+                break
+            }
+        }
+        val threshold = (medianBin + 0.5f) / BINS
+
+        var sum = 0.0
+        var samples = 0
+        y = 1
+        while (y < height - 1) {
+            var x = 1
+            while (x < width - 1) {
+                val i = y * width + x
+                val encoded = encode(lumaAt(red, green, blue, i))
+                if (encoded <= threshold) {
+                    val horizontal =
+                        0.5f * (encode(lumaAt(red, green, blue, i - 1)) + encode(lumaAt(red, green, blue, i + 1)))
+                    sum += abs(encoded - horizontal)
+                    samples++
+                }
+                x += STEP
+            }
+            y += STEP
+        }
+        if (samples == 0) return 0f
+        return (sum / samples).toFloat() / HIGH_PASS_GAIN
+    }
+
+    private fun lumaAt(red: FloatArray, green: FloatArray, blue: FloatArray, index: Int): Float =
+        0.2126f * red[index] + 0.7152f * green[index] + 0.0722f * blue[index]
 }
 
 /**
@@ -408,7 +529,12 @@ object Sharpener {
         val work = FloatArray(n)
         val blurredA = FloatArray(n)
         val blurredB = if (passes > 1) FloatArray(n) else blurredA
-        for (channel in arrayOf(rgb.r, rgb.g, rgb.b)) {
+        // Green first: it carries most of the luma and the least white-balance
+        // gain, so its residual is the best stand-in for luminance noise. One cut
+        // for all three channels keeps the sharpening from reacting to a change
+        // in *chroma* noise (the smoother's) as though it were detail.
+        var cut = 0f
+        for ((index, channel) in arrayOf(rgb.g, rgb.r, rgb.b).withIndex()) {
             var source = channel
             var target = blurredA
             repeat(passes) {
@@ -416,7 +542,7 @@ object Sharpener {
                 source = target
                 target = if (target === blurredA) blurredB else blurredA
             }
-            val cut = NOISE_REJECT * noiseFloor(channel, source)
+            if (index == 0) cut = NOISE_REJECT * noiseFloor(channel, source)
             CpuParallel.forEach(n) { start, end ->
                 for (i in start until end) {
                     val detail = channel[i] - source[i]

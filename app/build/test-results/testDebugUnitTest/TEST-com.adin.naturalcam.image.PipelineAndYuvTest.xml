@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.adin.naturalcam.image.PipelineAndYuvTest" tests="10" skipped="0" failures="0" errors="0" timestamp="2026-10-06T03:36:58.012Z" hostname="DESKTOP-5NKLUF6" time="0.316">
+<testsuite name="com.adin.naturalcam.image.PipelineAndYuvTest" tests="10" skipped="0" failures="0" errors="0" timestamp="2026-10-06T11:24:48.867Z" hostname="DESKTOP-5NKLUF6" time="0.374">
   <properties/>
-  <testcase name="pure raw output of neutral scene stays neutral" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.019"/>
-  <testcase name="yuv path runs end to end" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.021"/>
+  <testcase name="pure raw output of neutral scene stays neutral" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.022"/>
+  <testcase name="yuv path runs end to end" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.026"/>
   <testcase name="pipeline version is stable for regression tracking" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.0"/>
-  <testcase name="grain adds luma texture without adding chroma noise" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.146"/>
+  <testcase name="grain adds luma texture without adding chroma noise" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.183"/>
   <testcase name="yuv black and white map to linear endpoints" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.0"/>
-  <testcase name="natural applies tone while pure stays minimal" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.004"/>
+  <testcase name="natural applies tone while pure stays minimal" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.003"/>
   <testcase name="natural recipe carries its own exposure lift" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.0"/>
-  <testcase name="bloom style adds a visible halo around highlights in the encoded image" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.117"/>
+  <testcase name="bloom style adds a visible halo around highlights in the encoded image" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.132"/>
   <testcase name="pipeline develops raw for every cfa layout" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.006"/>
-  <testcase name="yuv converter is stride independent" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.0"/>
+  <testcase name="yuv converter is stride independent" classname="com.adin.naturalcam.image.PipelineAndYuvTest" time="0.001"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

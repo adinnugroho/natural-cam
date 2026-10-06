@@ -11,6 +11,7 @@ import com.adin.naturalcam.image.processing.HighlightRollOff
 import com.adin.naturalcam.image.processing.ImageRotation
 import com.adin.naturalcam.image.processing.LumaDenoiser
 import com.adin.naturalcam.image.processing.NaturalToneMapper
+import com.adin.naturalcam.image.processing.NoiseEstimator
 import com.adin.naturalcam.image.processing.NoiseReducer
 import com.adin.naturalcam.image.processing.OutputTransformer
 import com.adin.naturalcam.image.processing.Sharpener
@@ -102,13 +103,25 @@ class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
             out = NaturalToneMapper.map(out, config.tone)
             out = HighlightRollOff.apply(out, config.tone.highlightRollOffStart, config.tone.highlightCompression)
             out = NoiseReducer.reduce(out, config.chromaDenoiseStrength, config.lumaDenoiseStrength)
-            // The shading correction multiplied this pixel's chroma noise by the
-            // shading gain; absorb exactly that much again. No-op at the centre.
-            if (lensShading != null) out = ChromaSmoother.apply(out, lensShading)
-            // Smooth luma denoise first, then the cored sharpen restores edge
-            // contrast without lifting the grain back up.
-            out = LumaDenoiser.apply(out, config.lumaSmoothStrength)
-            out = Sharpener.sharpen(out, config.sharpenAmount, config.sharpenRadiusPx)
+            // Grain decides how much denoise this frame actually needs, so a clean bright
+            // frame keeps its 1-px texture and a dim one gets the grain taken out.
+            val grain = grainLevel(NoiseEstimator.shadowGrain(out))
+            val chromaStrength =
+                config.chromaSmoothStrength + (MAX_CHROMA_SMOOTH_STRENGTH - config.chromaSmoothStrength) * grain
+            val lumaStrength =
+                config.lumaSmoothStrength + (MAX_LUMA_SMOOTH_STRENGTH - config.lumaSmoothStrength) * grain
+            // Absorbs what the shading correction amplified, plus the chroma strength
+            // everywhere; a null map just means "no shading term".
+            out = ChromaSmoother.apply(out, lensShading, chromaStrength)
+            out = LumaDenoiser.apply(out, lumaStrength)
+            // Sharpen harder where the denoise worked harder. Denoising and sharpening
+            // share a band, so this is not free — but the cored sharpener only lifts what
+            // sits above the *new*, lower noise floor, which is mostly real structure.
+            // Measured, it roughly halves the detail a given grain reduction costs, and
+            // the edge overshoot still lands *below* the lightly-denoised rendering,
+            // because the denoise softened the edges the sharpen then works on.
+            val sharpen = config.sharpenAmount + (Sharpener.MAX_AMOUNT - config.sharpenAmount) * grain
+            out = Sharpener.sharpen(out, sharpen, config.sharpenRadiusPx)
             out = StyleEngine.apply(out, config.style)
         }
         // PURE and SYSTEM: only what makes the image viewable (SPEC 131).

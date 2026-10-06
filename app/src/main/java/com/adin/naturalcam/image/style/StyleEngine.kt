@@ -4,9 +4,8 @@ import com.adin.naturalcam.image.core.CpuParallel
 import com.adin.naturalcam.image.core.SATURATION_CHROMA_DENOISE
 import com.adin.naturalcam.image.core.SATURATION_RANGE
 import com.adin.naturalcam.image.core.STYLE_CHROMA_DENOISE_STRENGTH
-import com.adin.naturalcam.image.core.STYLE_LUMA_DENOISE_STRENGTH
 import com.adin.naturalcam.image.processing.BloomStage
-import com.adin.naturalcam.image.processing.NoiseReducer
+import com.adin.naturalcam.image.processing.ChromaSmoother
 
 import com.adin.naturalcam.image.core.RgbImage
 import com.adin.naturalcam.domain.StylePoint
@@ -78,22 +77,18 @@ object StyleEngine {
         val boost = style.saturation.coerceIn(0f, 1f)
         // Clean, then shape: the denoise runs first, so neither the pad tone curve nor
         // the saturation gain ever amplifies noise that could have been removed.
-        NoiseReducer.reduce(
-            rgb,
-            STYLE_CHROMA_DENOISE_STRENGTH * strength,
-            STYLE_LUMA_DENOISE_STRENGTH * strength,
-        )
-        // A boosted saturation widens the chroma it scales, noise included, so it pays a
-        // second chroma-only pass on the shifted 2x2 grid: the colour gets stronger
-        // while the colour noise the saved JPEG carries stays where it was.
+        //
+        // The smooth half-resolution chroma smoother does this now, not the 2x2 block
+        // reducer it replaced. A 2x2 average is block-periodic, so on a real frame it
+        // *added* flat-area structure — +37% luma and +28% chroma, measured with only
+        // the style chain toggled on a device DNG — instead of removing noise. Luma is
+        // left to the base chain, where the coring sharpener decides what is grain.
+        ChromaSmoother.apply(rgb, null, STYLE_CHROMA_DENOISE_STRENGTH * strength)
+        // A boosted saturation widens the chroma it scales, noise included, so it pays
+        // for its own amplification with the same smoother rather than a second pass on
+        // a shifted 2x2 grid.
         if (boost > 0f) {
-            NoiseReducer.reduce(
-                rgb,
-                chromaStrength = SATURATION_CHROMA_DENOISE * boost,
-                lumaStrength = 0f,
-                rowOffset = 1,
-                colOffset = 1,
-            )
+            ChromaSmoother.apply(rgb, null, SATURATION_CHROMA_DENOISE * boost)
         }
         if (strength > 0f) {
             val params = resolve(style)

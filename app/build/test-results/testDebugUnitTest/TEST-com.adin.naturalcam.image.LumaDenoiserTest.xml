@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.adin.naturalcam.image.LumaDenoiserTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-10-06T03:36:57.997Z" hostname="DESKTOP-5NKLUF6" time="0.011">
+<testsuite name="com.adin.naturalcam.image.LumaDenoiserTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-10-06T11:24:48.833Z" hostname="DESKTOP-5NKLUF6" time="0.014">
   <properties/>
-  <testcase name="colour differences are preserved exactly" classname="com.adin.naturalcam.image.LumaDenoiserTest" time="0.007"/>
-  <testcase name="zero strength is an exact no-op" classname="com.adin.naturalcam.image.LumaDenoiserTest" time="0.0"/>
-  <testcase name="common mode grain drops" classname="com.adin.naturalcam.image.LumaDenoiserTest" time="0.003"/>
+  <testcase name="colour differences are preserved exactly" classname="com.adin.naturalcam.image.LumaDenoiserTest" time="0.008"/>
+  <testcase name="zero strength is an exact no-op" classname="com.adin.naturalcam.image.LumaDenoiserTest" time="0.001"/>
+  <testcase name="common mode grain drops" classname="com.adin.naturalcam.image.LumaDenoiserTest" time="0.005"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>
