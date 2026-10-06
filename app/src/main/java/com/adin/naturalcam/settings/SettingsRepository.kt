@@ -74,7 +74,7 @@ private val KEY_GRID = booleanPreferencesKey("grid")
 private val KEY_STYLE = stringPreferencesKey("style")
 private val KEY_TEMPERATURE = androidx.datastore.preferences.core.floatPreferencesKey("temperature")
 
-/** Encoded as `version|toneX,toneY|colorX,colorY|paletteX,paletteY|strength`. */
+/** Encoded as `version|toneX,toneY|colorX,colorY|paletteX,paletteY|strength|bloom|grain|saturation`. */
 internal fun encodeStyle(style: StyleState): String =
     listOf(
         style.version,
@@ -82,6 +82,9 @@ internal fun encodeStyle(style: StyleState): String =
         style.color.x, style.color.y,
         style.palette.x, style.palette.y,
         style.strength,
+        style.bloom,
+        style.grain,
+        style.saturation,
     ).joinToString("|")
 
 internal fun decodeStyle(raw: String?): StyleState {
@@ -93,6 +96,9 @@ internal fun decodeStyle(raw: String?): StyleState {
             color = StylePoint(parts[3].toFloat(), parts[4].toFloat()),
             palette = StylePoint(parts[5].toFloat(), parts[6].toFloat()),
             strength = parts[7].toFloat(),
+            bloom = parts.getOrNull(8)?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0f,
+            grain = parts.getOrNull(9)?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0f,
+            saturation = parts.getOrNull(10)?.toFloatOrNull()?.coerceIn(-1f, 1f) ?: 0f,
         )
     }.getOrNull() ?: StyleState()
 }

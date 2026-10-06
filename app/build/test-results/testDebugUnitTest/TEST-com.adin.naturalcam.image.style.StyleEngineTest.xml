@@ -1,12 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.adin.naturalcam.image.style.StyleEngineTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-10-04T11:35:45.295Z" hostname="DESKTOP-5NKLUF6" time="0.217">
+<testsuite name="com.adin.naturalcam.image.style.StyleEngineTest" tests="13" skipped="0" failures="0" errors="0" timestamp="2026-10-06T01:48:03.049Z" hostname="DESKTOP-5NKLUF6" time="0.299">
   <properties/>
-  <testcase name="neutral gray stays neutral under tone and color" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.123"/>
-  <testcase name="all outputs remain finite and non-negative" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.043"/>
+  <testcase name="boosting saturation does not amplify chroma noise" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.014"/>
+  <testcase name="grain is not part of the style chain" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.031"/>
+  <testcase name="saturation leaves neutral gray neutral" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.043"/>
+  <testcase name="neutral gray stays neutral under tone and color" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.096"/>
+  <testcase name="all outputs remain finite and non-negative" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.079"/>
+  <testcase name="center pads add no tone or color change" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.002"/>
   <testcase name="strength interpolates monotonically toward styled value" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.0"/>
-  <testcase name="center pads are neutral" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.042"/>
-  <testcase name="strength zero equals natural" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.007"/>
-  <testcase name="shape is nonlinear with fine response near center" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.001"/>
+  <testcase name="style chain denoises at strength above zero and not at zero" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.006"/>
+  <testcase name="saturation scales chroma about luma in both directions" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.01"/>
+  <testcase name="strength zero equals natural" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.012"/>
+  <testcase name="shape is nonlinear with fine response near center" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.0"/>
+  <testcase name="saturation is independent of the pad style and of strength" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.001"/>
+  <testcase name="bloom is independent of the pad style and of strength" classname="com.adin.naturalcam.image.style.StyleEngineTest" time="0.002"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

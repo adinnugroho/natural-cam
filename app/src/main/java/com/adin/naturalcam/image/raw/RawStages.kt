@@ -3,6 +3,7 @@ package com.adin.naturalcam.image.raw
 import com.adin.naturalcam.image.core.BayerImage
 import com.adin.naturalcam.image.core.CfaLayout
 import com.adin.naturalcam.image.core.CpuParallel
+import com.adin.naturalcam.image.core.LensShadingMap
 import com.adin.naturalcam.image.core.RawImage
 import com.adin.naturalcam.image.core.RgbGains
 import com.adin.naturalcam.image.core.RgbImage
@@ -34,6 +35,93 @@ object RawNormalizer {
     /** Per-color black level; size-1 metadata acts as scalar (DngReader canonicalizes). */
     internal fun blackFor(black: FloatArray, channel: Int): Float =
         if (black.size == 1) black[0] else black[channel]
+}
+
+/**
+ * Applies the DNG GainMap lens-shading correction to a normalized Bayer mosaic
+ * (SPEC 31). The map is per CFA position, so it runs before demosaic; gains are
+ * bilinearly interpolated because the stored grid is coarse (17x17 on the
+ * Oppo CPH2737). Mutates [bayer] and returns it (ownership transfer, AGENTS 45):
+ * a full-frame copy would cost ~50 MB per 12 MP frame for no benefit.
+ *
+ * Only the *colour* part of the map is applied: every grid point is divided by
+ * the mean gain across the CFA positions present, which makes the correction
+ * luminance-neutral. A full shading correction multiplies sensor noise by the
+ * gain — up to ~5x at the corner of this lens — and that lands as coloured
+ * speckle in the shadows: measured on the Oppo CPH2737, dark pixels gained 46%
+ * chroma noise overall and 117% at the frame corner. The colour cast is what
+ * reads as a defect; the luminance vignette is a real property of the lens and
+ * is left in place rather than paid for with shadow noise.
+ *
+ * A map for a different frame, a single-position map (which cannot be split
+ * into colour and luminance), or one with no entry for a CFA position leaves
+ * that sample at its original value — no invented correction (AGENTS 18).
+ */
+object LensShadingCorrector {
+
+    fun correct(bayer: BayerImage, map: LensShadingMap): BayerImage {
+        if (map.imageWidth != bayer.width || map.imageHeight != bayer.height) return bayer
+        val grids = colourOnly(map.grids)
+        val width = bayer.width
+        val height = bayer.height
+        val columns = map.columns
+        val rows = map.rows
+        val scaleX = if (width <= 1) 0f else (columns - 1).toFloat() / (width - 1)
+        val columnLow = IntArray(width)
+        val columnHigh = IntArray(width)
+        val columnFrac = FloatArray(width)
+        for (x in 0 until width) {
+            val g = x * scaleX
+            val low = g.toInt().coerceIn(0, columns - 1)
+            val high = (low + 1).coerceAtMost(columns - 1)
+            columnLow[x] = low
+            columnHigh[x] = high
+            columnFrac[x] = if (high == low) 0f else g - low
+        }
+        val scaleY = if (height <= 1) 0f else (rows - 1).toFloat() / (height - 1)
+        val values = bayer.values
+        CpuParallel.forEach(height, minItemsPerTask = 128) { startRow, endRow ->
+            for (y in startRow until endRow) {
+                val gy = y * scaleY
+                val rowLow = gy.toInt().coerceIn(0, rows - 1)
+                val rowHigh = (rowLow + 1).coerceAtMost(rows - 1)
+                val fracY = if (rowHigh == rowLow) 0f else gy - rowLow
+                val baseLow = rowLow * columns
+                val baseHigh = rowHigh * columns
+                for (x in 0 until width) {
+                    val grid = grids[(y and 1) * 2 + (x and 1)] ?: continue
+                    val low = columnLow[x]
+                    val high = columnHigh[x]
+                    val fracX = columnFrac[x]
+                    val topLeft = grid[baseLow + low]
+                    val top = topLeft + (grid[baseLow + high] - topLeft) * fracX
+                    val bottomLeft = grid[baseHigh + low]
+                    val bottom = bottomLeft + (grid[baseHigh + high] - bottomLeft) * fracX
+                    values[y * width + x] *= top + (bottom - top) * fracY
+                }
+            }
+        }
+        return bayer
+    }
+
+    /**
+     * Splits the map into colour only: every grid point is divided by the mean
+     * gain of the CFA positions present. With fewer than two positions there is
+     * nothing to split, so the map is used unchanged.
+     */
+    private fun colourOnly(grids: Array<FloatArray?>): Array<FloatArray?> {
+        val present = grids.filterNotNull()
+        if (present.size < 2) return grids
+        return Array(grids.size) { index ->
+            grids[index]?.let { grid ->
+                FloatArray(grid.size) { i ->
+                    var sum = 0f
+                    for (other in present) sum += other[i]
+                    grid[i] / (sum / present.size)
+                }
+            }
+        }
+    }
 }
 
 /**

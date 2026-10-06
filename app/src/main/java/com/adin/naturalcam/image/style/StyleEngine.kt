@@ -1,6 +1,13 @@
 package com.adin.naturalcam.image.style
 
 import com.adin.naturalcam.image.core.CpuParallel
+import com.adin.naturalcam.image.core.SATURATION_CHROMA_DENOISE
+import com.adin.naturalcam.image.core.SATURATION_RANGE
+import com.adin.naturalcam.image.core.STYLE_CHROMA_DENOISE_STRENGTH
+import com.adin.naturalcam.image.core.STYLE_LUMA_DENOISE_STRENGTH
+import com.adin.naturalcam.image.processing.BloomStage
+import com.adin.naturalcam.image.processing.NoiseReducer
+
 import com.adin.naturalcam.image.core.RgbImage
 import com.adin.naturalcam.domain.StylePoint
 import com.adin.naturalcam.domain.StyleState
@@ -8,9 +15,10 @@ import kotlin.math.abs
 import kotlin.math.exp
 
 /**
- * Style engine (STYLE_PLAN 16): parameter-based transforms downstream of the
- * NATURAL base tone, upstream of gamut mapping. Center pads and strength 0
- * change nothing; strength 1 uses the bounded styled values (STYLE_PLAN 47).
+ * Style engine (STYLE_PLAN 16): a strength-scaled denoise plus parameter-based
+ * pad transforms, downstream of the NATURAL base tone and upstream of gamut
+ * mapping. Pad deltas are zero at pad center; strength 0 is an exact NATURAL
+ * identity; strength 1 uses the bounded styled values (STYLE_PLAN 12.3, 47).
  */
 object StyleEngine {
 
@@ -26,6 +34,7 @@ object StyleEngine {
         val paletteChromaBoost: Float,
         val shadowHueTint: Float,
     )
+
 
     fun resolve(style: StyleState): ResolvedStyle {
         val s = style.strength.coerceIn(0f, 1f)
@@ -47,6 +56,7 @@ object StyleEngine {
             // Palette undertone is deliberately small and chroma-weighted.
             shadowHueTint = 0.025f * paletteY * s,
         )
+
     }
 
     /** Nonlinear pad response: fine control near center, stronger at edges (STYLE_PLAN 18). */
@@ -54,13 +64,71 @@ object StyleEngine {
 
     internal fun shapeXY(point: StylePoint) = Pair(shape(point.x), shape(point.y))
 
+    /**
+     * Applies the style chain: a light strength-scaled denoise, the pad style, and
+     * the signed Saturation control. Saturation and Bloom are independent controls —
+     * they carry their own amounts and still apply with style strength at 0, unlike
+     * the denoise and the pads, which scale with (or vanish at) strength 0
+     * (STYLE_PLAN 12.3, 47). Grain is not here: it is applied to the delivered pixels
+     * by the pipeline, so an equal shift on every channel keeps it colour-free
+     * (see [GrainStage]).
+     */
     fun apply(rgb: RgbImage, style: StyleState): RgbImage {
-        if (style.strength <= 0f) return rgb
-        val params = resolve(style)
-        applyPalette(rgb, params)
-        applyColor(rgb, params)
-        applyTone(rgb, params)
+        val strength = style.strength.coerceIn(0f, 1f)
+        val boost = style.saturation.coerceIn(0f, 1f)
+        // Clean, then shape: the denoise runs first, so neither the pad tone curve nor
+        // the saturation gain ever amplifies noise that could have been removed.
+        NoiseReducer.reduce(
+            rgb,
+            STYLE_CHROMA_DENOISE_STRENGTH * strength,
+            STYLE_LUMA_DENOISE_STRENGTH * strength,
+        )
+        // A boosted saturation widens the chroma it scales, noise included, so it pays a
+        // second chroma-only pass on the shifted 2x2 grid: the colour gets stronger
+        // while the colour noise the saved JPEG carries stays where it was.
+        if (boost > 0f) {
+            NoiseReducer.reduce(
+                rgb,
+                chromaStrength = SATURATION_CHROMA_DENOISE * boost,
+                lumaStrength = 0f,
+                rowOffset = 1,
+                colOffset = 1,
+            )
+        }
+        if (strength > 0f) {
+            val params = resolve(style)
+            applyPalette(rgb, params)
+            applyColor(rgb, params)
+            applyTone(rgb, params)
+        }
+        // Signed and independent: 0 is neutral, and the user's own colour setting
+        // applies with the pads and with style strength at 0, like Bloom and Grain.
+        applySaturation(rgb, style.saturation)
+        BloomStage.apply(rgb, style.bloom)
         return rgb
+    }
+
+    /**
+     * Signed saturation as a chroma scale about the pixel's own luma. Scaling the
+     * chroma offset by one factor leaves the pixel on the same colour direction
+     * (hue) and only changes its distance from gray, which is exactly what a
+     * saturation control should do; gray pixels have no chroma and stay untouched.
+     */
+    private fun applySaturation(rgb: RgbImage, saturation: Float) {
+        val signed = saturation.coerceIn(-1f, 1f)
+        if (signed == 0f) return
+        val scale = 1f + SATURATION_RANGE * signed
+        CpuParallel.forEach(rgb.r.size) { start, end ->
+            for (i in start until end) {
+                val r = rgb.r[i]
+                val g = rgb.g[i]
+                val b = rgb.b[i]
+                val l = 0.2126f * r + 0.7152f * g + 0.0722f * b
+                rgb.r[i] = (l + (r - l) * scale).coerceAtLeast(0f)
+                rgb.g[i] = (l + (g - l) * scale).coerceAtLeast(0f)
+                rgb.b[i] = (l + (b - l) * scale).coerceAtLeast(0f)
+            }
+        }
     }
 
     /** Tone style via bounded tone-curve deltas (STYLE_PLAN 8.3); monotonic by construction. */

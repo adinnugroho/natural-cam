@@ -7,6 +7,33 @@ import com.adin.naturalcam.domain.StyleState
 internal const val NATURAL_CHROMA_DENOISE_STRENGTH = 0.18f
 
 /**
+ * Style-chain cleanup, scaled by style strength: the style workspace is a
+ * creative layer, so it starts from a slightly cleaner base before bloom and
+ * grain are added. Chroma is treated more strongly than luminance (AGENTS 26)
+ * to keep real texture and avoid waxy rendering.
+ */
+internal const val STYLE_CHROMA_DENOISE_STRENGTH = 0.6f
+internal const val STYLE_LUMA_DENOISE_STRENGTH = 0.20f
+
+/**
+ * Chroma multiplier span of the style Saturation control: the slider's -1..+1 maps
+ * to a chroma scale of 1 ± this around luma, so 0 is exactly neutral and the
+ * endpoints are a strong but bounded change (0.4x .. 1.6x).
+ */
+internal const val SATURATION_RANGE = 0.6f
+
+/**
+ * Extra chroma denoise per unit of *positive* Saturation, applied as a second 2x2
+ * chroma pass on a shifted block grid. Boosting saturation scales the chroma offset,
+ * and with it whatever chroma noise the pixel already carries, so the control pays
+ * for its own amplification: at full boost the shift-grid pass cancels the noise the
+ * 1.6x chroma scale would have magnified, while the extra smoothing stays inside the
+ * chroma resolution JPEG 4:2:0 discards anyway. Reducing saturation needs no
+ * compensation because it shrinks chroma noise along with the chroma.
+ */
+internal const val SATURATION_CHROMA_DENOISE = 1.0f
+
+/**
  * Explicit, centralized tuning parameters (AGENTS 64). MVP values are the
  * restrained starting points from SPEC 130; they are empirical placeholders
  * until real-device evaluation (AGENTS 63) — see LIMITATIONS.md.
@@ -47,7 +74,7 @@ data class ProcessingConfiguration(
     val jpegQuality: Int = 92,
 ) {
     companion object {
-        const val PIPELINE_VERSION = "natural-v16"
+        const val PIPELINE_VERSION = "natural-v25"
 
         fun forProfile(
             profile: ProcessingProfile,

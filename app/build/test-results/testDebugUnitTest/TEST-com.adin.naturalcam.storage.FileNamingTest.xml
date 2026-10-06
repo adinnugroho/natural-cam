@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.adin.naturalcam.storage.FileNamingTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-10-04T11:35:45.521Z" hostname="DESKTOP-5NKLUF6" time="0.003">
+<testsuite name="com.adin.naturalcam.storage.FileNamingTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-10-06T01:48:03.384Z" hostname="DESKTOP-5NKLUF6" time="0.005">
   <properties/>
   <testcase name="baseNameFormatsInLocalTime" classname="com.adin.naturalcam.storage.FileNamingTest" time="0.002"/>
   <testcase name="jpegAndDngShareTheBaseName" classname="com.adin.naturalcam.storage.FileNamingTest" time="0.001"/>
-  <testcase name="tempNameConcatenatesCaptureIdAndSuffix" classname="com.adin.naturalcam.storage.FileNamingTest" time="0.0"/>
+  <testcase name="tempNameConcatenatesCaptureIdAndSuffix" classname="com.adin.naturalcam.storage.FileNamingTest" time="0.001"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

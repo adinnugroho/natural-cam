@@ -1,6 +1,7 @@
 package com.adin.naturalcam.image.raw
 
 import com.adin.naturalcam.image.core.CfaLayout
+import com.adin.naturalcam.image.core.LensShadingMap
 import com.adin.naturalcam.image.core.RawCaptureMetadata
 import com.adin.naturalcam.image.core.RawImage
 import java.io.File
@@ -55,6 +56,7 @@ object DngReader {
     private const val TAG_FORWARD_MATRIX_2 = 50965
     private const val TAG_CALIBRATION_ILLUMINANT_1 = 50778
     private const val TAG_CALIBRATION_ILLUMINANT_2 = 50779
+    private const val TAG_OPCODE_LIST_2 = 51009
 
     private const val TYPE_BYTE = 1
     private const val TYPE_ASCII = 2
@@ -69,6 +71,13 @@ object DngReader {
     private const val TYPE_DOUBLE = 12
 
     private const val CFA_PHOTOMETRIC = 32803L
+
+    private const val MAX_OPCODES = 64
+    private const val OPCODE_GAIN_MAP = 9
+
+    /** Top/Left/Bottom/Right, Plane/Planes, RowPitch/ColPitch, MapPointsV/H — 10 uint32. */
+    private const val GAIN_MAP_HEADER = 40
+    private val OPCODE_ORDERS = arrayOf(ByteOrder.LITTLE_ENDIAN, ByteOrder.BIG_ENDIAN)
 
     fun read(file: File): RawImage = RandomAccessFile(file, "r").use { raf ->
         val header = ByteArray(8)
@@ -116,6 +125,10 @@ object DngReader {
         val whiteLevel = tag(TAG_WHITE_LEVEL)?.longValue() ?: ((1L shl bits.toInt()) - 1)
         val blackPerColor = canonicalizeBlackLevel(blackRaw, cfa)
 
+        val lensShading = tag(TAG_OPCODE_LIST_2)
+            ?.byteValues()
+            ?.let { parseLensShading(it, width.toInt(), height.toInt()) }
+
         val metadata = RawCaptureMetadata(
             cfa = cfa,
             blackLevelPerChannel = blackPerColor,
@@ -127,6 +140,7 @@ object DngReader {
             asShotNeutral = tag(TAG_AS_SHOT_NEUTRAL)?.takeIf { it.count == 3 }?.floatValues(),
             calibrationIlluminant1 = tag(TAG_CALIBRATION_ILLUMINANT_1)?.longValue()?.toInt(),
             calibrationIlluminant2 = tag(TAG_CALIBRATION_ILLUMINANT_2)?.longValue()?.toInt(),
+            lensShading = lensShading,
             isoSpeed = tag(TAG_ISO)?.longValue()?.toInt(),
             exposureTimeNs = tag(TAG_EXPOSURE_TIME)?.rationalValue()?.let { (it * 1_000_000_000.0).toLong() },
             aperture = tag(TAG_F_NUMBER)?.rationalValue()?.toFloat(),
@@ -176,6 +190,93 @@ object DngReader {
             2110 -> CfaLayout.BGGR
             else -> throw DngFormatException("Unsupported CFA pattern $key")
         }
+    }
+
+    /**
+     * Extracts the GainMap lens-shading grids from an OpcodeList2 payload (DNG
+     * 1.4 opcode 9, SPEC 31). Only single-plane maps that cover the whole frame
+     * are consumed; every other opcode, plane layout, or partial region is
+     * skipped, so the developer falls back to no correction instead of applying
+     * a map to the wrong pixels (AGENTS 18).
+     *
+     * The byte order is detected rather than assumed from the TIFF header: some
+     * HALs (Oppo CPH2737) write the opcode payload big-endian inside a
+     * little-endian DNG.
+     */
+    internal fun parseLensShading(bytes: ByteArray, width: Int, height: Int): LensShadingMap? {
+        val order = opcodeOrder(bytes) ?: return null
+        val bb = ByteBuffer.wrap(bytes).order(order)
+        val count = bb.getInt(0)
+        val grids = arrayOfNulls<FloatArray>(4)
+        var columns = 0
+        var rows = 0
+        var pos = 4
+        for (i in 0 until count) {
+            if (pos + 16 > bytes.size) break
+            val id = bb.getInt(pos)
+            val paramSize = bb.getInt(pos + 12)
+            pos += 16
+            if (paramSize < 0 || pos + paramSize > bytes.size) break
+            if (id == OPCODE_GAIN_MAP) {
+                val grid = gainGrid(bb, pos, paramSize, width, height)
+                if (grid != null && grids[grid.key] == null &&
+                    (columns == 0 || (grid.columns == columns && grid.rows == rows))
+                ) {
+                    grids[grid.key] = grid.values
+                    columns = grid.columns
+                    rows = grid.rows
+                }
+            }
+            pos += paramSize
+        }
+        if (columns == 0) return null
+        return LensShadingMap(columns, rows, width, height, grids)
+    }
+
+    private class GainGrid(val key: Int, val columns: Int, val rows: Int, val values: FloatArray)
+
+    /** The grid is stored at the end of the parameter block, so its size locates it. */
+    private fun gainGrid(bb: ByteBuffer, at: Int, paramSize: Int, width: Int, height: Int): GainGrid? {
+        if (paramSize < GAIN_MAP_HEADER + 4) return null
+        val top = bb.getInt(at)
+        val left = bb.getInt(at + 4)
+        val bottom = bb.getInt(at + 8)
+        val right = bb.getInt(at + 12)
+        val plane = bb.getInt(at + 16)
+        val planes = bb.getInt(at + 20)
+        val rowPitch = bb.getInt(at + 24)
+        val colPitch = bb.getInt(at + 28)
+        val mapRows = bb.getInt(at + 32)
+        val mapColumns = bb.getInt(at + 36)
+        if (planes != 1 || plane != 0 || rowPitch <= 0 || colPitch <= 0) return null
+        if (mapRows <= 1 || mapColumns <= 1) return null
+        val cells = mapRows.toLong() * mapColumns
+        if (cells * 4 > paramSize - GAIN_MAP_HEADER) return null
+        // A partial-region map needs spatial remapping this developer does not do.
+        if (top > 1 || left > 1 || bottom < height || right < width) return null
+        val dataAt = at + paramSize - (cells * 4).toInt()
+        val values = FloatArray(cells.toInt())
+        for (k in values.indices) values[k] = bb.getFloat(dataAt + k * 4)
+        return GainGrid((top and 1) * 2 + (left and 1), mapColumns, mapRows, values)
+    }
+
+    private fun opcodeOrder(bytes: ByteArray): ByteOrder? {
+        if (bytes.size < 4) return null
+        for (order in OPCODE_ORDERS) {
+            val bb = ByteBuffer.wrap(bytes).order(order)
+            val count = bb.getInt(0)
+            if (count <= 0 || count > MAX_OPCODES) continue
+            var pos = 4
+            var ok = true
+            for (i in 0 until count) {
+                if (pos + 16 > bytes.size) { ok = false; break }
+                val size = bb.getInt(pos + 12)
+                if (size < 0 || pos + 16 + size > bytes.size) { ok = false; break }
+                pos += 16 + size
+            }
+            if (ok) return order
+        }
+        return null
     }
 
     private fun orientationDegrees(tiff: Long): Int = when (tiff) {

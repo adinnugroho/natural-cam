@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.adin.naturalcam.capture.CaptureCoordinatorTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-10-04T11:35:44.713Z" hostname="DESKTOP-5NKLUF6" time="0.434">
+<testsuite name="com.adin.naturalcam.capture.CaptureCoordinatorTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-10-06T01:48:02.095Z" hostname="DESKTOP-5NKLUF6" time="0.402">
   <properties/>
-  <testcase name="system with raw mode saves both raw and hal jpeg" classname="com.adin.naturalcam.capture.CaptureCoordinatorTest" time="0.345"/>
-  <testcase name="capture failure is recoverable" classname="com.adin.naturalcam.capture.CaptureCoordinatorTest" time="0.022"/>
-  <testcase name="full queue refuses capture before acknowledgement" classname="com.adin.naturalcam.capture.CaptureCoordinatorTest" time="0.013"/>
+  <testcase name="system with raw mode saves both raw and hal jpeg" classname="com.adin.naturalcam.capture.CaptureCoordinatorTest" time="0.315"/>
+  <testcase name="capture failure is recoverable" classname="com.adin.naturalcam.capture.CaptureCoordinatorTest" time="0.018"/>
+  <testcase name="full queue refuses capture before acknowledgement" classname="com.adin.naturalcam.capture.CaptureCoordinatorTest" time="0.012"/>
   <testcase name="raw is retained when processing fails afterwards" classname="com.adin.naturalcam.capture.CaptureCoordinatorTest" time="0.033"/>
-  <testcase name="natural raw capture develops jpeg from raw" classname="com.adin.naturalcam.capture.CaptureCoordinatorTest" time="0.008"/>
-  <testcase name="raw only saves raw without decoding pixels" classname="com.adin.naturalcam.capture.CaptureCoordinatorTest" time="0.008"/>
-  <testcase name="yuv capture reaches complete and saves jpeg" classname="com.adin.naturalcam.capture.CaptureCoordinatorTest" time="0.004"/>
+  <testcase name="natural raw capture develops jpeg from raw" classname="com.adin.naturalcam.capture.CaptureCoordinatorTest" time="0.009"/>
+  <testcase name="raw only saves raw without decoding pixels" classname="com.adin.naturalcam.capture.CaptureCoordinatorTest" time="0.009"/>
+  <testcase name="yuv capture reaches complete and saves jpeg" classname="com.adin.naturalcam.capture.CaptureCoordinatorTest" time="0.005"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[]]></system-err>
 </testsuite>

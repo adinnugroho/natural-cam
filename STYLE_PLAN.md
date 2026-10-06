@@ -112,6 +112,12 @@ Avoid:
 
 The live preview should approximate the final styled output closely enough that users can compose and choose style intentionally.
 
+Where the preview can recolour the feed directly it should: `Saturation` is shown by
+a hue-preserving colour matrix on the camera view (display space, API 31+), because a
+signed colour change with no preview would mean composing blind. The matrix and the
+capture share one `SATURATION_RANGE`, so the slider means the same thing in both,
+even though the capture applies its scale in linear light.
+
 Perfect pixel identity is not required, but users should not see a dramatically different result after capture.
 
 ### 4.4 Styles Must Be Bounded
@@ -121,6 +127,19 @@ The Style system should not allow normal UI interactions to push the image into 
 All Style Pad coordinates map into **safe, bounded parameter ranges**.
 
 Extreme artistic modes may be added later as separate features, but are not part of Style v1.
+
+### 4.5 Independent Bloom control
+
+Bloom is an independent control in the Style workspace, not a style preset: it is
+usable with any selected style (and with the pads switched off) and is never part of
+the default rendering or PURE.
+It peak-pools the pixels above a bounded linear-light threshold into a mask at 1/16
+resolution, blurs that mask there (the glow spans ~1% of the frame width, so a
+full-resolution blur of the same radius would be ~256× the work), and bilinearly
+upsamples it back as added light. Amount 0 — or an image without highlights — is an
+exact no-op; the amount is a direct 0–1 slider with its own value, independent of the
+pad `Strength` control.
+
 
 ---
 
@@ -194,6 +213,44 @@ PALETTE
 Each dimension owns its own 2D Style Pad.
 
 A separate `Strength` control adjusts how strongly the complete style is applied.
+`Saturation`, `Bloom`, and `Grain` are not style dimensions and not presets: they
+are independent amount sliders that work alongside any style (and at `Strength` 0).
+Each affects only its own parameter. `Bloom` and `Grain` are bounded 0–1 amounts
+where 0 is an exact no-op; `Saturation` is signed −1…+1, because for it "no change"
+has to sit in the middle: 0 is exactly the settled colour, negative pulls chroma
+toward gray (0.4× at the end of the track), positive pushes it (1.6×), and neutral
+greys stay neutral at either end.
+
+A signed control must also *look* signed: one-sided rows keep the left-to-right fill
+that matches "0 = off", while `Saturation` draws its own centre-anchored fill and a
+neutral tick, and shows its readout outside the track. A boost widens the chroma it
+scales, noise included, so it pays a second chroma-only denoise pass on a shifted
+2x2 grid - inside the chroma resolution the JPEG output discards anyway - and the
+saved colour gets stronger without the colour noise growing with it.
+
+`Grain` is dynamic rather than a fixed overlay: its amplitude follows a midtone
+bell and fades out where the image already carries local detail or edges, so the
+grain reads as texture in smooth areas instead of being stamped over everything.
+Its structure is pixel-scale — one lattice octave near 1.6 px interpolated linearly
+(no smoothing, which reads as blur) over per-pixel speckle — with the amplitude only
+gently nudged by a small patch field and, where the grain has to survive 8-bit
+rounding, a dithered shift rather than a plain one.
+It is also applied to the *delivered* pixels — after tone, gamut, and the output
+transfer curve — rather than inside the linear working space, because only there
+can every channel take the same shift and leave the image's colour exactly
+untouched.
+
+The style chain also starts with a light denoise scaled by `Strength` (chroma
+stronger than luminance), so the styled result is a little cleaner before tone and
+bloom are applied. It disappears with `Strength`:
+
+```text
+style chain = denoise(strength) → TONE/COLOR/PALETTE pads(strength) → Saturation → Bloom
+delivered   = … → gamut → output transfer → Grain
+```
+
+The pads therefore change no tone or color at pad center, but the chain is not
+bit-identical to NATURAL above `Strength` 0; `Strength` 0 still is.
 
 ---
 
@@ -488,6 +545,10 @@ the output must be functionally equivalent to NATURAL.
 
 Style must not leave hidden side effects at zero strength.
 
+The independent amounts (`Saturation`, `Bloom`, `Grain`) are not hidden side
+effects: they are explicit user settings shown in the workspace, and they keep
+applying at `Strength` 0 the same way they apply at `Strength` 1.
+
 ---
 
 ## 13. Coordinate Model
@@ -521,8 +582,10 @@ data class StyleState(
     val tone: StylePoint = StylePoint(0f, 0f),
     val color: StylePoint = StylePoint(0f, 0f),
     val palette: StylePoint = StylePoint(0f, 0f),
+    val bloom: Float = 0f,
     val strength: Float = 1f
 )
+
 ```
 
 Values must be clamped at domain boundaries.
@@ -535,7 +598,6 @@ Style v1 should support named presets built from `StyleState`.
 
 Example conceptual presets:
 
-```text
 Natural
 Soft
 Warm
@@ -544,7 +606,7 @@ Cool
 Muted
 Rich
 Deep
-```
+
 
 These names are placeholders until product/design decisions are finalized.
 
@@ -782,6 +844,7 @@ selected preset ID
 Tone StylePoint
 Color StylePoint
 Palette StylePoint
+Bloom strength
 Strength
 style version
 ```

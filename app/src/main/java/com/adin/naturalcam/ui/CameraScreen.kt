@@ -1,13 +1,23 @@
 package com.adin.naturalcam.ui
 
 import android.graphics.Bitmap
+import android.graphics.ColorMatrixColorFilter
+import android.graphics.RenderEffect
+import android.os.Build
+import android.view.View
 import android.net.Uri
 import android.util.Size
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.ImageShader
+import androidx.compose.ui.graphics.ShaderBrush
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TileMode
 import androidx.activity.compose.BackHandler
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
@@ -74,6 +84,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
@@ -100,6 +111,8 @@ import com.adin.naturalcam.domain.SavedPhoto
 import com.adin.naturalcam.domain.StylePoint
 import com.adin.naturalcam.domain.StylePresets
 import com.adin.naturalcam.domain.StyleState
+import com.adin.naturalcam.image.core.SATURATION_RANGE
+import com.adin.naturalcam.image.processing.GrainStage
 import com.adin.naturalcam.ui.theme.CameraBlack
 import com.adin.naturalcam.ui.theme.CameraControl
 import com.adin.naturalcam.ui.theme.CameraOrange
@@ -251,6 +264,9 @@ private fun Preview(
                         onPreviewViewCreated(this)
                     }
                 },
+                // Runs on every recomposition, so dragging the Saturation slider repaints
+                // the live feed instead of waiting for the shot.
+                update = { view -> view.applyPreviewSaturation(state.style.saturation) },
             )
             frozenLensFrame?.let { frame ->
                 Image(
@@ -369,11 +385,18 @@ private fun Preview(
     }
 }
 
-/** Low-cost preview approximation of the same StyleState used by final capture. */
+/**
+ * Low-cost preview approximation of the same StyleState used by final capture.
+ * Bloom and Grain are independent controls, so they render even at style
+ * strength 0.
+ */
 @Composable
 private fun StylePreviewOverlay(style: StyleState, modifier: Modifier) {
     val strength = style.strength.coerceIn(0f, 1f)
-    if (strength <= 0f) return
+    val bloom = style.bloom.coerceIn(0f, 1f)
+    val grain = style.grain.coerceIn(0f, 1f)
+    if (strength <= 0f && bloom <= 0f && grain <= 0f) return
+    val grainBrush = remember { ShaderBrush(ImageShader(GRAIN_TILE, TileMode.Repeated, TileMode.Repeated)) }
     Canvas(modifier) {
         val toneDepth = (-style.tone.y).coerceIn(-1f, 1f) * strength
         val warmth = style.color.x.coerceIn(-1f, 1f) * strength
@@ -383,7 +406,85 @@ private fun StylePreviewOverlay(style: StyleState, modifier: Modifier) {
         if (warmth != 0f) drawRect(if (warmth > 0f) Color(0xFFFFA16A) else Color(0xFF8A94A0), alpha = kotlin.math.abs(warmth) * 0.07f)
         if (richness != 0f) drawRect(if (richness > 0f) Color(0xFFFFD28A) else Color.White, alpha = kotlin.math.abs(richness) * 0.045f)
         if (palette != 0f) drawRect(if (palette > 0f) Color(0xFFFFC66D) else Color(0xFF8A94A0), alpha = kotlin.math.abs(palette) * 0.035f)
+        if (bloom > 0f) {
+            // Preview approximation: the capture thresholds and blurs real highlights in
+            // linear light, which a live overlay cannot sample, so this reads as a soft
+            // frame-wide glow whose intensity tracks the amount slider.
+            drawRect(
+                Brush.radialGradient(
+                    colors = listOf(Color.White.copy(alpha = bloom * 0.14f), Color.Transparent),
+                    center = center,
+                    radius = size.minDimension * 0.85f,
+                ),
+            )
+        }
+        if (grain > 0f) {
+            // Preview approximation: capture adds deterministic linear-light monochrome
+            // grain weighted to midtones; a tiled noise bitmap in Overlay blend keeps the
+            // image mean unchanged and only moves local contrast.
+            drawRect(brush = grainBrush, blendMode = BlendMode.Overlay, alpha = grain * 0.6f)
+        }
     }
+}
+
+/**
+ * Paints the Style workspace's Saturation onto the live feed.
+ *
+ * The capture applies saturation in linear light through the whole pipeline; the
+ * preview cannot, so it recolours the camera view with a hue-preserving colour matrix
+ * instead - close enough to compose with, and the only way to show a signed colour
+ * change on a live feed without copying frames. API 31 is the floor for view-level
+ * colour effects; below that the preview simply keeps the camera's own colour and the
+ * slider only shows up in the saved photo.
+ */
+private fun View.applyPreviewSaturation(saturation: Float) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+    val signed = saturation.coerceIn(-1f, 1f)
+    val effect = if (signed == 0f) {
+        null
+    } else {
+        RenderEffect.createColorFilterEffect(
+            ColorMatrixColorFilter(saturationColorMatrix(1f + SATURATION_RANGE * signed)),
+        )
+    }
+    setRenderEffect(effect)
+}
+
+/**
+ * Standard saturation matrix: the chroma of the pixel is scaled about its luminance,
+ * which is what the capture's Saturation control does in linear light.
+ */
+private fun saturationColorMatrix(scale: Float): FloatArray {
+    val lr = 0.2126f
+    val lg = 0.7152f
+    val lb = 0.0722f
+    val inv = 1f - scale
+    return floatArrayOf(
+        lr * inv + scale, lg * inv, lb * inv, 0f, 0f,
+        lr * inv, lg * inv + scale, lb * inv, 0f, 0f,
+        lr * inv, lg * inv, lb * inv + scale, 0f, 0f,
+        0f, 0f, 0f, 1f, 0f,
+    )
+}
+
+/**
+ * Fixed noise tile for the grain preview. Generated once from the same grain
+ * field the capture stage uses, so the overlay shows the same clumped character;
+ * a deterministic tile keeps the overlay allocation-free while dragging. The
+ * tile is large enough to hold several density patches, which keeps the repeat
+ * from reading as a pattern.
+ */
+private val GRAIN_TILE: ImageBitmap by lazy {
+    val size = 512
+    val pixels = IntArray(size * size)
+    for (y in 0 until size) {
+        for (x in 0 until size) {
+            val v = ((GrainStage.sample(x, y) * 127f) + 128f).toInt().coerceIn(0, 255)
+            pixels[y * size + x] = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+        }
+    }
+    val bitmap = Bitmap.createBitmap(pixels, size, size, Bitmap.Config.ARGB_8888)
+    bitmap.asImageBitmap()
 }
 
 private fun previewFrameRatio(aspectRatio: AspectRatio, portrait: Boolean): Float? {
@@ -721,14 +822,12 @@ private fun StyleModeTopBar(
                 Box(Modifier.width(48.dp), contentAlignment = Alignment.CenterStart) {
                     CameraIconButton(R.drawable.ic_back, "Kembali", CameraWhite, false, onBack)
                 }
-                Text("STYLE", color = CameraWhite, style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(start = 8.dp))
-                Text(
-                    strengthLabel(state.style.strength),
-                    color = CameraOrange,
-                    style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier.padding(start = 12.dp),
-                )
-                Spacer(Modifier.weight(1f))
+                // Strength lives in the header so the pad dock keeps only Bloom + reset.
+                StyleSliderRow(
+                    label = "STYLE",
+                    value = state.style.strength,
+                    modifier = Modifier.weight(1f),
+                ) { actions.onSetStyle(state.style.copy(strength = it)) }
             }
             // Inline preset list: one explicit row, no popup and no collapsed height.
             Row(
@@ -740,7 +839,7 @@ private fun StyleModeTopBar(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 StylePresets.entries.forEach { preset ->
-                    val selected = preset.state == state.style.copy(strength = state.style.strength)
+                    val selected = preset.matches(state.style)
                     Box(
                         Modifier
                             .height(30.dp)
@@ -770,17 +869,12 @@ private fun StyleModeTopBar(
     }
 }
 
-private fun strengthLabel(s: Float): String {
-    val percent = (s * 100f).roundToInt().coerceIn(0, 100)
-    return "${if (percent == 0) "" else (if (percent > 0 && s > 0f) "" else "")}$percent%"
-}
-
 /**
  * Style-mode bottom editor: one big 2D pad where X = COLOR cool↔warm paired with
  * TONE soft↔hard influence lanes, and Y = TONE lift↔deepen crossed with PALETTE
  * gold↔blue shadow tint. The style engine's pads derive from this single point:
  * tone = (x soft/half of hard axis, y), color = (x, chromaFromY|lift), palette = (side, gold/blue).
- * Strength is a compact slider row; RESET/DONE close the mode (back also works).
+ * Strength and Bloom use the same compact row as the EV slider. Back closes the mode.
  */
 @Composable
 private fun SinglePadEditor(
@@ -793,53 +887,229 @@ private fun SinglePadEditor(
         Modifier
             .fillMaxWidth()
             .navigationBarsPadding()
-            .padding(start = 12.dp, end = 12.dp, bottom = bottomMargin)
+            .padding(start = 10.dp, end = 10.dp, bottom = bottomMargin)
             .neuRaised(corner = 22.dp, depth = 6.dp),
     ) {
-    Column(
-        Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
         Row(
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // Compact square pad inside the dock.
             SinglePad(point, onPointChange = { pt -> onStyleChange(singlePadToStyle(pt, style)) })
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    "STRENGTH",
-                    color = CameraWhite.copy(alpha = 0.55f),
-                    style = MaterialTheme.typography.labelSmall,
-                )
-                Slider(
-                    value = style.strength,
-                    onValueChange = { onStyleChange(style.copy(strength = it)) },
-                    valueRange = 0f..1f,
-                    colors = SliderDefaults.colors(
-                        thumbColor = CameraOrange,
-                        activeTrackColor = CameraOrange,
-                        inactiveTrackColor = CameraBlack,
-                    ),
-                )
-                Text(
-                    "${(style.strength * 100).roundToInt()}%",
-                    color = CameraOrange,
-                    style = MaterialTheme.typography.labelLarge,
-                )
-                Box(
-                    Modifier
-                        .neuRaised(corner = 14.dp, depth = 4.dp)
-                        .clickable { onStyleChange(StyleState()) }
-                        .padding(horizontal = 18.dp, vertical = 10.dp),
-                ) {
-                    Text("RESET", color = CameraWhite, style = MaterialTheme.typography.labelMedium)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                var amountControl by remember { mutableStateOf(StyleAmount.BLOOM) }
+                var pickerOpen by remember { mutableStateOf(false) }
+                Box {
+                    StyleSliderRow(
+                        label = amountControl.label,
+                        value = amountControl.amountOf(style),
+                        range = amountControl.range,
+                        format = amountControl::format,
+                        onLabelClick = { pickerOpen = true },
+                    ) { onStyleChange(amountControl.withAmount(style, it)) }
+                    if (pickerOpen) {
+                        CameraPopupRow(
+                            options = StyleAmount.entries.map { PopupOption(it.label, it == amountControl) },
+                            onSelect = { index ->
+                                amountControl = StyleAmount.entries[index]
+                                pickerOpen = false
+                            },
+                            onDismissRequest = { pickerOpen = false },
+                            preferAbove = true,
+                            // Three entries have to fit one popup row.
+                            itemWidth = 76.dp,
+                        )
+                    }
+                }
+                Box(Modifier.align(Alignment.End)) {
+                    Box(
+                        Modifier
+                            .neuRaised(corner = 12.dp, depth = 3.dp)
+                            // Reset the pads and strength; the independent amounts are kept.
+                            .clickable {
+                                onStyleChange(
+                                    StyleState(
+                                        bloom = style.bloom,
+                                        grain = style.grain,
+                                        saturation = style.saturation,
+                                    ),
+                                )
+                            }
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                    ) {
+                        Text("RESET", color = CameraWhite, style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
         }
     }
+}
+
+/**
+ * The amount controls the dock's single slider can edit. Each is independent of
+ * the pads and of style strength, so the list only swaps which amount the row
+ * shows; every other field of the state is carried over untouched. Saturation is
+ * signed (neutral at the middle of its track) because "no change" must be the
+ * default for it, unlike Bloom and Grain where 0 already means off.
+ */
+private enum class StyleAmount(
+    val label: String,
+    val range: ClosedFloatingPointRange<Float>,
+) {
+    BLOOM("BLOOM", 0f..1f),
+    GRAIN("GRAIN", 0f..1f),
+    SATURATION("SATURATION", -1f..1f),
+    ;
+
+    fun amountOf(style: StyleState): Float = when (this) {
+        BLOOM -> style.bloom
+        GRAIN -> style.grain
+        SATURATION -> style.saturation
+    }
+
+    fun withAmount(style: StyleState, amount: Float): StyleState = when (this) {
+        BLOOM -> style.copy(bloom = amount.coerceIn(0f, 1f))
+        GRAIN -> style.copy(grain = amount.coerceIn(0f, 1f))
+        SATURATION -> style.copy(saturation = amount.coerceIn(-1f, 1f))
+    }
+
+    /** Signed for a bipolar control, plain percentage for an amount from zero. */
+    fun format(amount: Float): String {
+        val percent = (amount * 100f).roundToInt()
+        return if (range.start < 0f && percent > 0) "+$percent%" else "$percent%"
     }
 }
+
+/**
+ * Same compact shape as the EV control: short tag, track with the amount inside it.
+ *
+ * A one-sided amount (Bloom, Grain) fills its track from the left, which is what
+ * "0 means off" looks like. A signed control (Saturation) must not: filling from
+ * the left would read as 50% at rest. Bipolar rows therefore draw their own
+ * centre-anchored fill and a neutral tick, and let the Material slider only own
+ * the thumb, the drag, and the accessibility node.
+ */
+@Composable
+private fun StyleSliderRow(
+    label: String,
+    value: Float,
+    modifier: Modifier = Modifier,
+    range: ClosedFloatingPointRange<Float> = 0f..1f,
+    format: (Float) -> String = { "${(it * 100).roundToInt()}%" },
+    onLabelClick: (() -> Unit)? = null,
+    onValueChange: (Float) -> Unit,
+) {
+    val amount = value.coerceIn(range.start, range.endInclusive)
+    val bipolar = range.start < 0f
+    Row(
+        modifier
+            .fillMaxWidth()
+            .neuPressed(corner = 14.dp, depth = 3.dp)
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            // The caret marks the tag as the control picker when it has a menu.
+            if (onLabelClick == null) label else "$label ▾",
+            color = CameraOrange,
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+            maxLines = 1,
+            softWrap = false,
+            modifier = if (onLabelClick == null) {
+                Modifier
+            } else {
+                Modifier
+                    .semantics { contentDescription = "Pilih kontrol jumlah, $label" }
+                    .clickable(onClick = onLabelClick)
+            },
+        )
+        Box(
+            Modifier.weight(1f),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (bipolar) {
+                // Drawn under the slider: the slider's own track is transparent for
+                // bipolar rows, so this is the only track the user sees.
+                Canvas(Modifier.fillMaxWidth().height(22.dp)) {
+                    val trackStart = BIPOLAR_TRACK_INSET.toPx()
+                    val trackEnd = size.width - BIPOLAR_TRACK_INSET.toPx()
+                    val centerX = size.width / 2f
+                    val thumbX = trackStart + (amount - range.start) / (range.endInclusive - range.start) * (trackEnd - trackStart)
+                    val stroke = 5.dp.toPx()
+                    val centerY = center.y
+                    // Empty track: a dim line, so the control reads as a scale, not a bar.
+                    drawLine(
+                        Color.White.copy(alpha = 0.16f),
+                        Offset(trackStart, centerY),
+                        Offset(trackEnd, centerY),
+                        stroke,
+                        StrokeCap.Round,
+                    )
+                    // Deviation from neutral, growing out of the centre.
+                    drawLine(
+                        CameraOrange,
+                        Offset(centerX, centerY),
+                        Offset(thumbX, centerY),
+                        stroke,
+                        StrokeCap.Round,
+                    )
+                    // Neutral tick: the slider's thumb lands exactly on it at 0.
+                    drawLine(
+                        Color.White.copy(alpha = 0.45f),
+                        Offset(centerX, centerY - 5.dp.toPx()),
+                        Offset(centerX, centerY + 5.dp.toPx()),
+                        1.5.dp.toPx(),
+                    )
+                }
+            }
+            Slider(
+                value = amount,
+                onValueChange = onValueChange,
+                valueRange = range,
+                // Snapping a signed control at 10% steps keeps exact neutral reachable.
+                steps = if (bipolar) 20 else 0,
+                modifier = Modifier.fillMaxWidth().height(22.dp),
+                colors = SliderDefaults.colors(
+                    thumbColor = CameraOrange,
+                    activeTrackColor = if (bipolar) Color.Transparent else CameraOrange,
+                    inactiveTrackColor = if (bipolar) Color.Transparent else CameraBlack,
+                    activeTickColor = Color.Transparent,
+                    inactiveTickColor = if (bipolar) Color.Transparent else CameraWhite.copy(alpha = 0.3f),
+                ),
+            )
+            if (!bipolar) {
+                // Inside the track, so the row needs no separate value column: white
+                // stays readable over both the filled and the empty part of the track.
+                Text(
+                    format(amount),
+                    color = CameraWhite,
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
+        }
+        if (bipolar) {
+            // A signed row keeps its value outside the track: inside, the neutral tick
+            // and the fill growing out of the centre would run through the digits.
+            Text(
+                format(amount),
+                color = CameraWhite,
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                textAlign = TextAlign.End,
+                maxLines = 1,
+                modifier = Modifier.width(40.dp),
+            )
+        }
+    }
+}
+
+/**
+ * Half the Material slider's thumb travel at each end, so a hand-drawn bipolar
+ * fill stops exactly where the thumb can reach.
+ */
+private val BIPOLAR_TRACK_INSET = 10.dp
 
 /**
  * The one knob (STYLE_PLAN revision: single pad controls everything). Maps to

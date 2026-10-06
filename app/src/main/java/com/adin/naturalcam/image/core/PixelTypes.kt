@@ -42,6 +42,8 @@ data class RawCaptureMetadata(
     /** DNG CalibrationIlluminantN codes paired with the color/forward matrices. */
     val calibrationIlluminant1: Int? = null,
     val calibrationIlluminant2: Int? = null,
+    /** DNG lens-shading gain grid (OpcodeList2 GainMap); null when the producer writes none. */
+    val lensShading: LensShadingMap? = null,
 ) {
     init {
         require(whiteLevel > 0) { "whiteLevel must be positive" }
@@ -60,9 +62,37 @@ data class RawCaptureMetadata(
         aperture == other.aperture && focalLengthMm == other.focalLengthMm &&
         orientationDegrees == other.orientationDegrees && timestampMs == other.timestampMs &&
         calibrationIlluminant1 == other.calibrationIlluminant1 &&
-        calibrationIlluminant2 == other.calibrationIlluminant2
+        calibrationIlluminant2 == other.calibrationIlluminant2 &&
+        lensShading == other.lensShading
 
     override fun hashCode(): Int = cfa.hashCode() * 31 + whiteLevel
+}
+
+/**
+ * DNG lens-shading correction (GainMap opcode, SPEC 31). The producer stores a
+ * coarse grid of linear-light gains per CFA position; multiplying the mosaic by
+ * it removes the lens's vignetting and colour shading. The platform ISP applies
+ * this for its own captures, so a custom RAW development has to apply it itself
+ * or the corners stay dark and colour-shifted.
+ *
+ * [grids] is indexed by CFA position `(y and 1) * 2 + (x and 1)`; a null entry
+ * means the producer wrote no map for that position, and those samples are left
+ * untouched rather than corrected with an invented one (AGENTS 18).
+ */
+class LensShadingMap internal constructor(
+    val columns: Int,
+    val rows: Int,
+    /** Frame the grid covers; the corrector refuses to apply it to a different one. */
+    val imageWidth: Int,
+    val imageHeight: Int,
+    internal val grids: Array<FloatArray?>,
+) {
+    override fun equals(other: Any?): Boolean = this === other ||
+        other is LensShadingMap && columns == other.columns && rows == other.rows &&
+        imageWidth == other.imageWidth && imageHeight == other.imageHeight &&
+        grids.contentDeepEquals(other.grids)
+
+    override fun hashCode(): Int = ((columns * 31 + rows) * 31 + imageWidth) * 31 + imageHeight
 }
 
 internal fun FloatArray?.contentEqualsNullable(other: FloatArray?): Boolean =

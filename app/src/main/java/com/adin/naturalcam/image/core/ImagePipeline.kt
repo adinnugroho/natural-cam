@@ -5,6 +5,7 @@ import com.adin.naturalcam.image.processing.ColorTransformStage
 import com.adin.naturalcam.image.processing.ClippedHighlightNeutralizer
 import com.adin.naturalcam.image.processing.ExposureProcessor
 import com.adin.naturalcam.image.processing.GamutMapper
+import com.adin.naturalcam.image.processing.GrainStage
 import com.adin.naturalcam.image.processing.HighlightRollOff
 import com.adin.naturalcam.image.processing.ImageRotation
 import com.adin.naturalcam.image.processing.NaturalToneMapper
@@ -14,6 +15,7 @@ import com.adin.naturalcam.image.processing.Sharpener
 import com.adin.naturalcam.image.processing.WhiteBalanceStage
 import com.adin.naturalcam.image.raw.ColorMatrixFactory
 import com.adin.naturalcam.image.raw.Demosaicer
+import com.adin.naturalcam.image.raw.LensShadingCorrector
 import com.adin.naturalcam.image.raw.RawNormalizer
 import com.adin.naturalcam.image.style.StyleEngine
 import com.adin.naturalcam.image.yuv.YuvToRgbConverter
@@ -31,14 +33,15 @@ interface ImagePipeline {
 }
 
 /**
- * Reference CPU pipeline, natural-v13 (SPEC 130):
- * normalize → metadata WB → calibration-selected color transform → residual
- * neutral correction → clipped-highlight neutralization → exposure → hue-
- * preserving tone/roll-off → chroma denoise → gamut → sRGB → encode.
+ * Reference CPU pipeline, natural-v25 (SPEC 130):
+ * normalize → lens-shading colour correction → metadata WB → calibration-selected
+ * color transform → residual neutral correction → clipped-highlight
+ * neutralization → exposure → hue-preserving tone/roll-off → chroma denoise →
+ * gamut → sRGB → encode.
  *
  * PURE/SYSTEM inputs take only the transformations required for a viewable
  * image (SPEC 131). YUV input arrives already color-rendered by the ISP, so
- * white balance and the camera matrix are skipped for it.
+ * white balance, the camera matrix and lens shading are skipped for it.
  */
 class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
 
@@ -46,7 +49,10 @@ class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
 
     override fun processRaw(raw: RawImage, config: ProcessingConfiguration): EncodedImage {
         val bayer = RawNormalizer.normalize(raw)
-        var rgb = Demosaicer.demosaic(bayer)
+        // Lens-shading colour correction first: the GainMap is per CFA position and
+        // must be undone before demosaic blends neighbouring samples (SPEC 31).
+        val shaded = raw.metadata.lensShading?.let { LensShadingCorrector.correct(bayer, it) } ?: bayer
+        var rgb = Demosaicer.demosaic(shaded)
 
         val meta = raw.metadata
         val neutral = meta.asShotNeutral
@@ -95,6 +101,12 @@ class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
         // PURE and SYSTEM: only what makes the image viewable (SPEC 131).
         out = GamutMapper.clampToSrgbGamut(out)
         val argb = OutputTransformer.toArgb8888(out)
+        // Grain belongs to the delivered pixels: an equal whole-level shift on all three
+        // channels is exactly colour-free, which an earlier linear-light stage could not
+        // be. NATURAL only, like the rest of the style chain.
+        if (config.profile == ProcessingProfile.NATURAL) {
+            GrainStage.apply(argb, out.width, out.height, config.style.grain)
+        }
         val rotated = ImageRotation.rotate(argb, out.width, out.height, orientationDegrees)
         return encoder.encode(rotated.argb, rotated.width, rotated.height, config.jpegQuality)
     }

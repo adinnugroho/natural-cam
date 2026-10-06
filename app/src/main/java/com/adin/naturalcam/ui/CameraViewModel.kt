@@ -254,8 +254,15 @@ class CameraViewModel(
     }
 
     override fun onSelectStylePreset(style: StyleState) {
-        val next = style.copy(strength = _uiState.value.style.strength)
-        onSetStyle(next)
+        // A preset only moves the pads: strength, bloom, and grain are independent controls.
+        val current = _uiState.value.style
+        onSetStyle(
+            style.copy(
+                strength = current.strength,
+                bloom = current.bloom,
+                grain = current.grain,
+            ),
+        )
     }
 
 
