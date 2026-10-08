@@ -186,14 +186,16 @@ object ChromaSmoother {
             }
         }
 
-        // Pass 2: edge-aware separable [1,2,1] per plane. A luma jump of 0.04
-        // halves cross-edge mixing; flat regions still receive the full blur.
+        // Pass 2: edge-aware separable [1,2,1] per plane. The threshold sits above the
+        // frame's own noise, so flat and merely noisy regions get the full blur
+        // (bit-identical to an unconditional pass) and only real luma edges mix less.
+        val edgeThreshold = CHROMA_EDGE_THRESHOLD
         val blurredCr = FloatArray(planeWidth * planeHeight)
         val blurredCb = FloatArray(planeWidth * planeHeight)
-        edgeAwareBlur121Horizontal(crPlane, lumaPlane, crPlane, planeWidth, planeHeight)
-        edgeAwareBlur121Vertical(crPlane, lumaPlane, blurredCr, planeWidth, planeHeight)
-        edgeAwareBlur121Horizontal(cbPlane, lumaPlane, cbPlane, planeWidth, planeHeight)
-        edgeAwareBlur121Vertical(cbPlane, lumaPlane, blurredCb, planeWidth, planeHeight)
+        edgeAwareBlur121Horizontal(crPlane, lumaPlane, crPlane, planeWidth, planeHeight, edgeThreshold)
+        edgeAwareBlur121Vertical(crPlane, lumaPlane, blurredCr, planeWidth, planeHeight, edgeThreshold)
+        edgeAwareBlur121Horizontal(cbPlane, lumaPlane, cbPlane, planeWidth, planeHeight, edgeThreshold)
+        edgeAwareBlur121Vertical(cbPlane, lumaPlane, blurredCb, planeWidth, planeHeight, edgeThreshold)
 
 
         // Pass 3: rebuild, keeping each pixel's own luma exactly.
@@ -929,10 +931,31 @@ internal fun blur121Vertical(src: FloatArray, dst: FloatArray, w: Int, h: Int) {
     }
 }
 
-private const val CHROMA_EDGE_SOFTNESS = 0.04f
+/**
+ * Luma difference below which two neighbouring half-resolution guide samples are
+ * treated as the same surface, so the chroma blur runs across them unchanged.
+ *
+ * Calibrated by measurement, not guessed: the guide's own 1-px step reads a median
+ * of 0.002 linear on a dim frame and 0.010 on an indoor one, and the lens-shading
+ * correction lifts corner noise by up to ~5x on top of that — so a threshold of
+ * 0.12 sits an order of magnitude above the noisiest corner the app ships, while a
+ * real edge (a window frame against a wall, a silhouette) clears it by several
+ * times. A threshold derived from the frame's *median* step does not work: the
+ * noise is not uniform, so the corners still tripped it and lost their denoise
+ * (measured +15% residual midtone chroma HF on a dusk frame, against 0% here).
+ *
+ * If a future sensor or ISO range exceeds this, the fix is a spatially varying
+ * threshold, not a larger constant: at some point every edge would be suppressed too.
+ */
+private const val CHROMA_EDGE_THRESHOLD = 0.12f
 
-private fun chromaEdgeWeight(center: Float, neighbor: Float): Float =
-    1f / (1f + abs(center - neighbor) / CHROMA_EDGE_SOFTNESS)
+/**
+ * Guide-difference weight: at or below [threshold] the difference is surface, not
+ * an edge, so the pixel gets the full blur; above it the weight falls off as
+ * `threshold / difference`, so a real edge mixes progressively less across itself.
+ */
+private fun chromaEdgeWeight(difference: Float, threshold: Float): Float =
+    if (difference <= threshold) 1f else threshold / difference
 
 /** Luma-guided binomial pass; safe in-place because neighbours are read first. */
 internal fun edgeAwareBlur121Horizontal(
@@ -941,6 +964,7 @@ internal fun edgeAwareBlur121Horizontal(
     dst: FloatArray,
     w: Int,
     h: Int,
+    threshold: Float,
 ) {
     CpuParallel.forEach(h, minItemsPerTask = 128) { startRow, endRow ->
         for (y in startRow until endRow) {
@@ -954,8 +978,8 @@ internal fun edgeAwareBlur121Horizontal(
                 val rightIndex = row + (x + 1).coerceAtMost(w - 1)
                 val right = src[rightIndex]
                 val rightGuide = guide[rightIndex]
-                val leftWeight = chromaEdgeWeight(centerGuide, leftGuide)
-                val rightWeight = chromaEdgeWeight(centerGuide, rightGuide)
+                val leftWeight = chromaEdgeWeight(abs(centerGuide - leftGuide), threshold)
+                val rightWeight = chromaEdgeWeight(abs(centerGuide - rightGuide), threshold)
                 dst[index] = (leftWeight * left + 2f * mid + rightWeight * right) /
                     (leftWeight + 2f + rightWeight)
                 left = mid
@@ -972,6 +996,7 @@ internal fun edgeAwareBlur121Vertical(
     dst: FloatArray,
     w: Int,
     h: Int,
+    threshold: Float,
 ) {
     CpuParallel.forEach(h, minItemsPerTask = 128) { startRow, endRow ->
         for (y in startRow until endRow) {
@@ -981,8 +1006,8 @@ internal fun edgeAwareBlur121Vertical(
             for (x in 0 until w) {
                 val index = mid + x
                 val centerGuide = guide[index]
-                val upWeight = chromaEdgeWeight(centerGuide, guide[up + x])
-                val downWeight = chromaEdgeWeight(centerGuide, guide[down + x])
+                val upWeight = chromaEdgeWeight(abs(centerGuide - guide[up + x]), threshold)
+                val downWeight = chromaEdgeWeight(abs(centerGuide - guide[down + x]), threshold)
                 dst[index] = (upWeight * src[up + x] + 2f * src[index] + downWeight * src[down + x]) /
                     (upWeight + 2f + downWeight)
             }

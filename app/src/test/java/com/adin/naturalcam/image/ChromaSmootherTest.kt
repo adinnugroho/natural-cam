@@ -73,6 +73,45 @@ class ChromaSmootherTest {
     }
 
     @Test
+    fun `the edge gate reacts to structure, not to the guide's noise`() {
+        // Two flat halves carrying chroma noise: (a) no step, (b) a luma step below the
+        // edge threshold, (c) a real edge that also carries a chroma difference. The gate
+        // must treat (b) exactly like (a) — its own noise is not structure — and must keep
+        // (c)'s chroma instead of washing it across the edge. A threshold taken from the
+        // frame's median noise instead cost +9…15% residual midtone chroma HF on device
+        // DNGs, because that noise is not uniform: corner shading amplifies it.
+        fun render(left: Triple<Float, Float, Float>, right: Triple<Float, Float, Float>): Float {
+            val rgb = RgbImage(16, 16)
+            var seed = 4242L
+            for (i in rgb.r.indices) {
+                seed = (seed * 1103515245 + 12345) and 0x7FFFFFFF
+                val noise = ((seed % 1000) / 1000f - 0.5f) * 0.08f
+                val side = if (i % rgb.width < 8) left else right
+                rgb.r[i] = side.first + noise
+                rgb.g[i] = side.second
+                rgb.b[i] = side.third + noise
+            }
+            val before = spread(rgb)
+            ChromaSmoother.apply(rgb, map(1f, 16), baseStrength = 0.7f)
+            return spread(rgb) / before
+        }
+
+        val uniform = render(Triple(0.30f, 0.30f, 0.30f), Triple(0.30f, 0.30f, 0.30f))
+        val smallStep = render(Triple(0.30f, 0.30f, 0.30f), Triple(0.35f, 0.35f, 0.35f))
+        val realEdge = render(Triple(0.30f, 0.24f, 0.24f), Triple(0.80f, 0.86f, 0.86f))
+
+        assertTrue("chroma noise must collapse: $uniform", uniform < 0.6f)
+        assertTrue(
+            "a 0.05 luma step is noise, not structure: $smallStep against $uniform",
+            kotlin.math.abs(smallStep - uniform) < 0.05f,
+        )
+        assertTrue(
+            "a real edge must keep its chroma: $realEdge against $smallStep",
+            realEdge > smallStep * 1.5f,
+        )
+    }
+
+    @Test
     fun `edge-aware chroma keeps separated bright color edges`() {
         val image = RgbImage(16, 8)
         for (i in image.r.indices) {
