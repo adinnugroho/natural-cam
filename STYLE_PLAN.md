@@ -610,6 +610,12 @@ Deep
 
 These names are placeholders until product/design decisions are finalized.
 
+`Warm Street` (`warm_street`) is the exception: its look is specified in
+`FILM_STYLE.md` and it is shipped as the ninth built-in preset — a restrained
+warm street-photography / filmic character (firm black point, dense warm-neutral
+midtones, soft warm highlights, restrained blues, organic greens) built only from
+pads.
+
 A preset is only a starting point.
 
 Users can move the Style Pads after choosing a preset.

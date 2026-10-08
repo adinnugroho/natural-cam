@@ -1,22 +1,28 @@
-# STYLE plan implementation status — 2026-10-04
+# STYLE plan implementation status — 2026-10-08
 
 ## Implemented
 
-- **Domain:** validated `StylePoint` coordinates in [-1, 1], versioned `StyleState`, eight style presets, and independent Bloom, Grain, and Saturation amounts.
+- **Domain:** validated `StylePoint` coordinates in [-1, 1], versioned `StyleState`, nine style presets, and independent Bloom, Grain, and Saturation amounts.
 - **Engine:** strength-scaled light denoise, then bounded tone/color/palette processors, then the signed saturation chroma scale and the independent linear-light highlight bloom, downstream of NATURAL; a saturation boost also buys a shifted-grid chroma-only denoise pass so colour noise does not grow with colour; strength 0 is an exact NATURAL identity and bloom survives it. Grain is separate from this chain: the pipeline applies it to the delivered ARGB pixels after the output transfer, so its equal-per-channel shift keeps colour exactly untouched.
+- **Pad direction (V2):** the tone and palette mapping is now the documented one (STYLE_PLAN 8.2, 10.3). Three latent defects had inverted it: the tone Y axis was negated, the contrast term compressed instead of expanding around the 0.18 pivot, the deepen branch brightened instead of darkening, and the palette chroma boost was used as the chroma factor itself, so *any* nonzero palette X scaled R and B chroma to ~1% of its offset and turned the frame grey (a blue sky came back grey; the reason no preset touched that axis). `StyleVersion` is V2; styles saved earlier render differently and are not migrated, because the old rendering contradicted its own documentation.
+- **Warm Street preset:** `warm_street` ("Warm Street") — a restrained warm filmic street look built entirely from pads (tone +0.30/−0.50, color +0.40/−0.35, palette −0.25/+0.45). Measured on a synthetic scene set: deep-but-unclipped blacks (display 0.051 → 0.027, monotone), midtones ≈ −1%, highlights ≈ −1%, blue chroma −5% at an unchanged hue, green hue 117° → 116° with its chroma kept, skin chroma −4% with no orange cast, neutral grey exactly neutral. The pads are the reference effect fractions run back through `shape()`, and contrast is deliberately below the reference's suggestion — the equivalent pad clips the deepest shadows (limitation #11).
 - **Persistence/capture:** style state persists through DataStore and is threaded through final NATURAL capture; RAW remains unstyled.
-- **Live preview:** bounded visual approximation follows the same StyleState while editing, and Saturation additionally recolours the camera feed itself through a display-space colour matrix (`RenderEffect`, API 31+); full-resolution capture uses the reference StyleEngine.
+- **Live preview:** bounded visual approximation follows the same StyleState while editing, and Saturation additionally recolours the camera feed itself through a display-space colour matrix (`RenderEffect`, API 31+); full-resolution capture uses the reference StyleEngine. The approximation paints tone.Y, color.X/Y and palette.Y as flat overlays; it has no contrast term, so a pad's "firm" component shows only in the capture.
 - **Style mode UI:** tapping the style logo replaces the normal camera chrome with a dedicated style workspace:
   - floating STYLE header with back control, the strength slider (percentage drawn inside the track), and inline preset chips;
   - compact 1:1 150dp colored grid pad;
   - grid-snapped coordinates at 0.1 steps;
   - one compact amount row beside the pad whose tag is a dropdown that picks which amount the slider edits (Bloom / Grain / Saturation), with the amount drawn inside the track for one-sided amounts and outside it for the signed Saturation row (centre-anchored fill and neutral tick), plus reset;
   - back returns to the normal camera workspace.
+- **Debug:** the NATURAL capture log carries `style=` (preset id, state version, pads, strength, bloom/grain/saturation, every resolved parameter) beside the `style=…ms` stage timing. Hallation does not exist in the codebase, so nothing is logged for it.
 - **Safety:** palette shadow undertone is chroma-weighted and bounded; neutral pixels stay neutral. Top-bar preset actions are explicitly forwarded through the MainActivity action adapter.
-- **Tests:** full unit suite and debug build pass. Device walkthrough previously verified style mode, pad dragging, strength retention, and capture.
+- **Tests:** 155/155 unit tests green (20 classes, 9 of them for Warm Street, the pad direction and the debug line); `lintDebug` 0 errors, `assembleDebug` builds.
+- **Device (Oppo CPH2737, 2026-10-08):** the preset is wired end to end — the capture log reports `style=warm_street-v2 tone=0.3/-0.5 color=0.4/-0.35 palette=-0.25/0.45 strength=1.0` with the resolved parameters matching the JVM values, the style stage costs 2599 ms of a 7138 ms develop (570 ms with neutral pads), `JPG+RAW` still writes the untouched DNG, and a same-DNG A/B through the production pipeline measures the black point at −15% (indoor) / −18% (dusk street), midtones and highlights inside ±0.5%, chroma −3…−6%, and every hue family inside 1°. Full table in LIMITATIONS.
 
 ## Deliberate limits
 
-- Preview is an efficient approximation, not pixel-identical full-resolution output.
+- Preview is an efficient approximation, not pixel-identical full-resolution output, and it renders no contrast component.
 - No LUT import, vignette, semantic masks, beauty processing, cloud processing, or style EXIF stamping.
 - Palette directions remain deliberately restrained to avoid yellow/orange or cyan casts at extreme positions.
+- Tone contrast has one fixed pivot and no toe, so it cannot be pushed far without clipping the deepest shadows (LIMITATIONS #11). Skin is protected structurally rather than by hue-range detection: the colour and palette passes are chroma-weighted, and the tone pass only scales level.
+- The undertone axis warms the **lower** tones (`exp(-l·2)`, STYLE_PLAN §11): Warm Street measured deep-shadow R/B +5% and highlight-band R/B −1%, i.e. warm shadows and marginally cooler highlights — the inverse of FILM_STYLE's "warm highlights, slightly cooler shadows". A highlight-tint term does not exist (LIMITATIONS #12).
