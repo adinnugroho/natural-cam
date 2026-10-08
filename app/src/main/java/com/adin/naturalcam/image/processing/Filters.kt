@@ -980,8 +980,13 @@ internal fun edgeAwareBlur121Horizontal(
                 val rightGuide = guide[rightIndex]
                 val leftWeight = chromaEdgeWeight(abs(centerGuide - leftGuide), threshold)
                 val rightWeight = chromaEdgeWeight(abs(centerGuide - rightGuide), threshold)
-                dst[index] = (leftWeight * left + 2f * mid + rightWeight * right) /
-                    (leftWeight + 2f + rightWeight)
+                val weighted = leftWeight * left + 2f * mid + rightWeight * right
+                // Ungated samples (the overwhelming majority) reduce to the plain [1,2,1]
+                // exactly: skipping the normalising divide keeps the stage's cost where it
+                // was, and makes flat regions bit-identical to an unconditional pass.
+                dst[index] =
+                    if (leftWeight == 1f && rightWeight == 1f) weighted * 0.25f
+                    else weighted / (leftWeight + 2f + rightWeight)
                 left = mid
                 leftGuide = centerGuide
             }
@@ -1008,8 +1013,10 @@ internal fun edgeAwareBlur121Vertical(
                 val centerGuide = guide[index]
                 val upWeight = chromaEdgeWeight(abs(centerGuide - guide[up + x]), threshold)
                 val downWeight = chromaEdgeWeight(abs(centerGuide - guide[down + x]), threshold)
-                dst[index] = (upWeight * src[up + x] + 2f * src[index] + downWeight * src[down + x]) /
-                    (upWeight + 2f + downWeight)
+                val weighted = upWeight * src[up + x] + 2f * src[index] + downWeight * src[down + x]
+                dst[index] =
+                    if (upWeight == 1f && downWeight == 1f) weighted * 0.25f
+                    else weighted / (upWeight + 2f + downWeight)
             }
         }
     }
