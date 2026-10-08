@@ -176,7 +176,7 @@ data class ProcessingConfiguration(
     val jpegQuality: Int = 92,
 ) {
     companion object {
-        const val PIPELINE_VERSION = "natural-v37"
+        const val PIPELINE_VERSION = "natural-v38"
 
         fun forProfile(
             profile: ProcessingProfile,

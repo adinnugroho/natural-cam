@@ -103,10 +103,9 @@ object NoiseReducer {
             chromaStrength * (meanChromaB - sourceChromaB)
     }
 }
-
 /**
- * Chroma smoothing for the noise the lens-shading correction amplifies, done on
- * the half-resolution chroma plane the JPEG actually keeps.
+ * Edge-aware chroma smoothing for the noise the lens-shading correction amplifies,
+ * done on the half-resolution chroma plane the JPEG actually keeps.
  *
  * Correcting the luminance vignette multiplies a pixel's signal *and its noise*
  * by the shading gain — up to ~5x at the frame corner of this lens. Chroma is
@@ -118,16 +117,17 @@ object NoiseReducer {
  *
  * Luma is carried through untouched: the blend moves only the chroma offsets,
  * and the luma it would have changed is subtracted back out, so the stage
- * cannot soften anything. Strength per pixel is `1 - 1/gain`, so at the frame
- * centre — where the correction does nothing — it is an exact no-op, and where
- * the correction amplified by `gain` the residual chroma noise returns to the
- * centre's level.
+ * cannot soften anything. A half-resolution luma guide reduces cross-edge
+ * chroma bleed while keeping flat regions fully denoised.
+ *
+ * Strength per pixel is `1 - 1/gain`, so at the frame centre — where the
+ * correction does nothing — it is an exact no-op, and where the correction
+ * amplified by `gain` the residual chroma noise returns to the centre's level.
  *
  * Every pass is parallel: the planes are small, the horizontal pass is
  * row-independent, and the vertical pass reads one plane while writing another.
- * The previous full-resolution version was the pipeline's only sequential
- * stage, because a rolling three-row window was the only way to avoid a
- * full-frame scratch.
+ * The previous full-resolution version was the pipeline's only sequential stage,
+ * because a rolling three-row window was the only way to avoid a full-frame scratch.
  */
 object ChromaSmoother {
 
@@ -163,9 +163,11 @@ object ChromaSmoother {
         val green = rgb.g
         val blue = rgb.b
 
-        // Pass 1: 2x2 average of R-G and B-G into the chroma planes.
+        // Pass 1: 2x2 average of R-G and B-G into the chroma planes, plus a
+        // half-resolution luma guide for edge-aware blending.
         val crPlane = FloatArray(planeWidth * planeHeight)
         val cbPlane = FloatArray(planeWidth * planeHeight)
+        val lumaPlane = FloatArray(planeWidth * planeHeight)
         CpuParallel.forEach(planeHeight, minItemsPerTask = 64) { start, end ->
             for (py in start until end) {
                 val top = py * 2 * width
@@ -179,17 +181,20 @@ object ChromaSmoother {
                     val i = py * planeWidth + px
                     crPlane[i] = r - g
                     cbPlane[i] = b - g
+                    lumaPlane[i] = luminance(r, g, b)
                 }
             }
         }
 
-        // Pass 2: separable [1,2,1] per plane (shared with the sharpener/bloom blur).
+        // Pass 2: edge-aware separable [1,2,1] per plane. A luma jump of 0.04
+        // halves cross-edge mixing; flat regions still receive the full blur.
         val blurredCr = FloatArray(planeWidth * planeHeight)
         val blurredCb = FloatArray(planeWidth * planeHeight)
-        blur121Horizontal(crPlane, crPlane, planeWidth, planeHeight)
-        blur121Vertical(crPlane, blurredCr, planeWidth, planeHeight)
-        blur121Horizontal(cbPlane, cbPlane, planeWidth, planeHeight)
-        blur121Vertical(cbPlane, blurredCb, planeWidth, planeHeight)
+        edgeAwareBlur121Horizontal(crPlane, lumaPlane, crPlane, planeWidth, planeHeight)
+        edgeAwareBlur121Vertical(crPlane, lumaPlane, blurredCr, planeWidth, planeHeight)
+        edgeAwareBlur121Horizontal(cbPlane, lumaPlane, cbPlane, planeWidth, planeHeight)
+        edgeAwareBlur121Vertical(cbPlane, lumaPlane, blurredCb, planeWidth, planeHeight)
+
 
         // Pass 3: rebuild, keeping each pixel's own luma exactly.
         CpuParallel.forEach(height, minItemsPerTask = 128) { startRow, endRow ->
@@ -919,6 +924,67 @@ internal fun blur121Vertical(src: FloatArray, dst: FloatArray, w: Int, h: Int) {
             val down = (y + 1).coerceAtMost(h - 1) * w
             for (x in 0 until w) {
                 dst[mid + x] = (src[up + x] + 2f * src[mid + x] + src[down + x]) * 0.25f
+            }
+        }
+    }
+}
+
+private const val CHROMA_EDGE_SOFTNESS = 0.04f
+
+private fun chromaEdgeWeight(center: Float, neighbor: Float): Float =
+    1f / (1f + abs(center - neighbor) / CHROMA_EDGE_SOFTNESS)
+
+/** Luma-guided binomial pass; safe in-place because neighbours are read first. */
+internal fun edgeAwareBlur121Horizontal(
+    src: FloatArray,
+    guide: FloatArray,
+    dst: FloatArray,
+    w: Int,
+    h: Int,
+) {
+    CpuParallel.forEach(h, minItemsPerTask = 128) { startRow, endRow ->
+        for (y in startRow until endRow) {
+            val row = y * w
+            var left = src[row]
+            var leftGuide = guide[row]
+            for (x in 0 until w) {
+                val index = row + x
+                val mid = src[index]
+                val centerGuide = guide[index]
+                val rightIndex = row + (x + 1).coerceAtMost(w - 1)
+                val right = src[rightIndex]
+                val rightGuide = guide[rightIndex]
+                val leftWeight = chromaEdgeWeight(centerGuide, leftGuide)
+                val rightWeight = chromaEdgeWeight(centerGuide, rightGuide)
+                dst[index] = (leftWeight * left + 2f * mid + rightWeight * right) /
+                    (leftWeight + 2f + rightWeight)
+                left = mid
+                leftGuide = centerGuide
+            }
+        }
+    }
+}
+
+/** Luma-guided vertical pass; source and destination must differ. */
+internal fun edgeAwareBlur121Vertical(
+    src: FloatArray,
+    guide: FloatArray,
+    dst: FloatArray,
+    w: Int,
+    h: Int,
+) {
+    CpuParallel.forEach(h, minItemsPerTask = 128) { startRow, endRow ->
+        for (y in startRow until endRow) {
+            val up = (y - 1).coerceAtLeast(0) * w
+            val mid = y * w
+            val down = (y + 1).coerceAtMost(h - 1) * w
+            for (x in 0 until w) {
+                val index = mid + x
+                val centerGuide = guide[index]
+                val upWeight = chromaEdgeWeight(centerGuide, guide[up + x])
+                val downWeight = chromaEdgeWeight(centerGuide, guide[down + x])
+                dst[index] = (upWeight * src[up + x] + 2f * src[index] + downWeight * src[down + x]) /
+                    (upWeight + 2f + downWeight)
             }
         }
     }

@@ -73,6 +73,30 @@ class ChromaSmootherTest {
     }
 
     @Test
+    fun `edge-aware chroma keeps separated bright color edges`() {
+        val image = RgbImage(16, 8)
+        for (i in image.r.indices) {
+            val x = i % image.width
+            if (x < image.width / 2) {
+                image.r[i] = 0.35f
+                image.g[i] = 0.20f
+                image.b[i] = 0.20f
+            } else {
+                image.r[i] = 0.70f
+                image.g[i] = 0.85f
+                image.b[i] = 0.85f
+            }
+        }
+
+        ChromaSmoother.apply(image, map(1f, image.width), baseStrength = 1f)
+
+        val left = image.r[6] - image.g[6]
+        val right = image.r[9] - image.g[9]
+        assertTrue("left chroma edge bled away: $left", left > 0.10f)
+        assertTrue("right chroma edge bled away: $right", right < -0.10f)
+    }
+
+    @Test
     fun `a map for another frame is ignored`() {
         val image = TestImages.checkerboard(8)
         val before = image.r.copyOf()
