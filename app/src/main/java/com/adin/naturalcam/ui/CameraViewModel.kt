@@ -1,6 +1,5 @@
 package com.adin.naturalcam.ui
 
-import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.MediaStore
@@ -9,7 +8,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.adin.naturalcam.capture.CaptureCoordinator
 import com.adin.naturalcam.camera.CameraController
+import com.adin.naturalcam.camera.toCameraError
 import com.adin.naturalcam.domain.AspectRatio
+import com.adin.naturalcam.domain.CameraCapabilities
 import com.adin.naturalcam.domain.CameraError
 import com.adin.naturalcam.domain.CameraId
 import com.adin.naturalcam.domain.CameraState
@@ -26,9 +27,10 @@ import com.adin.naturalcam.domain.RawMode
 import com.adin.naturalcam.domain.StyleState
 import com.adin.naturalcam.settings.SettingsRepository
 import com.adin.naturalcam.storage.LatestPhotoReader
-import com.adin.naturalcam.camera.CameraException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -39,11 +41,10 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import java.lang.ref.WeakReference
 import java.util.UUID
 
 sealed interface VmEvent {
-    data object OpenSettings : VmEvent
-    data object OpenDeviceInfo : VmEvent
     data object RequestLocationPermission : VmEvent
     data class OpenGallery(val uri: String?) : VmEvent
 }
@@ -56,7 +57,6 @@ class CameraViewModel(
     private val controller: CameraController,
     private val coordinator: CaptureCoordinator,
     private val settingsRepository: SettingsRepository,
-    private val appContext: Context,
     private val latestPhotoReader: LatestPhotoReader,
 ) : ViewModel(), CameraActions {
 
@@ -66,7 +66,12 @@ class CameraViewModel(
     private val _events = MutableSharedFlow<VmEvent>(extraBufferCapacity = 4)
     val events: SharedFlow<VmEvent> = _events.asSharedFlow()
 
-    private var attachedPreviewView: PreviewView? = null
+    /**
+     * Weak: the ViewModel outlives the camera screen, so a strong reference would keep the
+     * disposed PreviewView (and its activity context) alive until the ViewModel dies. Only
+     * identity is ever read from it.
+     */
+    private var attachedPreviewView: WeakReference<PreviewView>? = null
     private var zoomJob: Job? = null
     private var lensSelectionJob: Job? = null
     private var initialized = false
@@ -76,9 +81,6 @@ class CameraViewModel(
                 _uiState.update {
                     it.copy(
                         captureState = captureState,
-                        isShutterEnabled = captureState is CaptureState.Idle ||
-                            captureState is CaptureState.Complete ||
-                            captureState is CaptureState.Failed,
                         lastCapture = (captureState as? CaptureState.Complete)?.result ?: it.lastCapture,
                         notice = (captureState as? CaptureState.Failed)?.let { failed ->
                             UiNotice(message = failed.error.detail ?: failed.error.toString(), isError = true)
@@ -86,6 +88,18 @@ class CameraViewModel(
                     )
                 }
                 if (captureState is CaptureState.Complete) coordinator.acknowledge()
+            }
+        }
+        // The shutter follows the queue, not the current phase: while an earlier photo
+        // develops, the next shot is still allowed (up to the coordinator's bound).
+        viewModelScope.launch {
+            coordinator.jobsInFlight.collect { inFlight ->
+                _uiState.update {
+                    it.copy(
+                        jobsInFlight = inFlight,
+                        isShutterEnabled = inFlight < coordinator.maxConcurrentJobs,
+                    )
+                }
             }
         }
         viewModelScope.launch {
@@ -122,7 +136,9 @@ class CameraViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(cameraState = CameraState.Initializing) }
             try {
-                val lenses = controller.initialize()
+                // The scan reads dozens of Camera2 metadata keys per camera; keep it off
+                // the main thread (AGENTS 44: no blocking work on main).
+                val lenses = withContext(Dispatchers.Default) { controller.initialize() }
                 val default = lenses.firstOrNull { it.isDefault } ?: lenses.firstOrNull()
                 _uiState.update {
                     it.copy(lenses = lenses, selectedCameraId = default?.cameraId)
@@ -130,7 +146,7 @@ class CameraViewModel(
                 default?.let { selectCameraInternal(it.cameraId) }
             } catch (e: Exception) {
                 _uiState.update {
-                    it.copy(cameraState = CameraState.Error(e.toDomainError()))
+                    it.copy(cameraState = CameraState.Error(e.toCameraError { CameraError.CameraUnavailable(it) }))
                 }
             }
         }
@@ -150,12 +166,12 @@ class CameraViewModel(
 
     fun onPreviewView(previewView: PreviewView) {
         controller.attachPreview(previewView)
-        if (attachedPreviewView === previewView) return
+        if (attachedPreviewView?.get() === previewView) return
 
         // Navigation recreates PreviewView while the ViewModel survives. Rebind
         // the existing camera session to the new surface instead of leaving the
         // preview attached to the disposed camera screen.
-        attachedPreviewView = previewView
+        attachedPreviewView = WeakReference(previewView)
         val cameraId = _uiState.value.selectedCameraId ?: return
         if (initialized) {
             viewModelScope.launch { selectCameraInternal(cameraId) }
@@ -171,10 +187,12 @@ class CameraViewModel(
                     selectedCameraId = cameraId,
                     capabilities = controller.capabilities[cameraId],
                     exposureCompensationEv = 0f,
+                    // A different camera starts at 1x, matching the controller's own reset.
+                    wideAngleActive = false,
                 )
             }
         } catch (e: Exception) {
-            _uiState.update { it.copy(cameraState = CameraState.Error(e.toDomainError())) }
+            _uiState.update { it.copy(cameraState = CameraState.Error(e.toCameraError { CameraError.CameraUnavailable(it) })) }
         }
     }
 
@@ -206,6 +224,8 @@ class CameraViewModel(
                 exposureMode = ExposureMode.Auto,
                 focusMode = FocusMode.CONTINUOUS,
                 flashMode = state.flashMode,
+                aspectRatio = state.aspectRatio,
+                zoomRatio = controller.zoomRatio,
                 temperature = state.temperature,
                 style = state.style,
                 outputSettings = OutputSettings(locationTagging = geotaggingEnabled),
@@ -215,17 +235,20 @@ class CameraViewModel(
     }
 
     override fun onSelectLens(cameraId: CameraId, zoomRatio: Float) {
-        if (cameraId == _uiState.value.selectedCameraId || lensSelectionJob?.isActive == true) return
         // Do not queue repeated physical-camera rebinds from a single pinch.
+        if (lensSelectionJob?.isActive == true) return
         lensSelectionJob = viewModelScope.launch {
-            selectCameraInternal(cameraId)
+            // The same camera at a different ratio is the wide-angle preset (or a pinch that
+            // crossed a lens boundary): a framing change, not a rebind.
+            if (cameraId != _uiState.value.selectedCameraId) selectCameraInternal(cameraId)
             if (_uiState.value.selectedCameraId == cameraId) {
                 controller.setZoom(zoomRatio)
+                _uiState.update { it.copy(wideAngleActive = zoomRatio < 1f) }
             }
         }
     }
 
-    override fun onSelectProfile(profile: ProcessingProfile) {
+    fun onSelectProfile(profile: ProcessingProfile) {
         viewModelScope.launch { settingsRepository.setProfile(profile) }
     }
 
@@ -254,28 +277,19 @@ class CameraViewModel(
     }
 
     override fun onSelectStylePreset(style: StyleState) {
-        // A preset only moves the pads: strength, bloom, and grain are independent controls.
+        // A preset only moves the pads: strength, bloom, grain, and saturation are
+        // independent controls that outlive the preset choice (STYLE_PLAN 12.3).
         val current = _uiState.value.style
         onSetStyle(
             style.copy(
                 strength = current.strength,
                 bloom = current.bloom,
                 grain = current.grain,
+                saturation = current.saturation,
             ),
         )
     }
 
-
-    override fun onCycleTimer() {
-        viewModelScope.launch {
-            val next = when (_uiState.value.timerSeconds) {
-                0 -> 3
-                3 -> 10
-                else -> 0
-            }
-            settingsRepository.setTimerSeconds(next)
-        }
-    }
 
     override fun onSetAspectRatio(aspectRatio: AspectRatio) {
         viewModelScope.launch {
@@ -289,10 +303,6 @@ class CameraViewModel(
             settingsRepository.setHighestResolution(enabled)
             controller.setHighestResolution(enabled)
         }
-    }
-
-    override fun onToggleGrid() {
-        viewModelScope.launch { settingsRepository.setGrid(!gridEnabled()) }
     }
 
     override fun onTapToFocus(xFraction: Float, yFraction: Float) {
@@ -309,20 +319,18 @@ class CameraViewModel(
     }
 
     override fun onPinchZoom(zoomRatio: Float) {
+        // Only the wide/normal transition is published; the picker and the lens label need to
+        // know which side of 1x the framing is on, not the exact ratio per frame.
+        val wide = zoomRatio < 1f
+        if (wide != _uiState.value.wideAngleActive) {
+            _uiState.update { it.copy(wideAngleActive = wide) }
+        }
         // CameraX applies this request synchronously; start immediately so
         // pointer events do not wait behind the main-dispatch queue.
         zoomJob?.cancel()
         zoomJob = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
             controller.setZoom(zoomRatio)
         }
-    }
-
-    override fun onOpenSettings() {
-        _events.tryEmit(VmEvent.OpenSettings)
-    }
-
-    override fun onOpenDeviceInfo() {
-        _events.tryEmit(VmEvent.OpenDeviceInfo)
     }
 
     override fun onOpenGallery() {
@@ -362,14 +370,12 @@ class CameraViewModel(
         }
     }
 
-    fun allCapabilities(): List<com.adin.naturalcam.domain.CameraCapabilities> =
+    fun allCapabilities(): List<CameraCapabilities> =
         controller.capabilities.values.toList()
 
     fun currentSettings() = settingsRepository.settings
 
     // ---- helpers ----
-
-    private fun gridEnabled(): Boolean = _uiState.value.gridEnabled
 
     @Volatile
     private var geotaggingEnabled: Boolean = false
@@ -385,8 +391,14 @@ class CameraViewModel(
         }
     }
 
-    private fun Exception.toDomainError(): CameraError = when (this) {
-        is CameraException -> error
-        else -> CameraError.CameraUnavailable(message ?: javaClass.simpleName)
+    /**
+     * Terminal teardown (AGENTS 44): the CameraX backend's executor, analysis channel
+     * and bound use cases otherwise survive for the process lifetime. The ViewModel's
+     * own scope is being torn down right now, so teardown runs on a scope that is not
+     * — and CameraX must unbind on the main thread.
+     */
+    override fun onCleared() {
+        super.onCleared()
+        CoroutineScope(Dispatchers.Main.immediate).launch { controller.close() }
     }
 }

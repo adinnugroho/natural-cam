@@ -74,6 +74,9 @@ interface CameraController {
     /** Smooth zoom within the selected lens's optical/digital range (0 = reset). */
     suspend fun setZoom(zoomRatio: Float)
 
+    /** The zoom the framing is currently composed with; below 1x a wider lens is engaged. */
+    val zoomRatio: Float
+
     /** Tap-to-focus at normalized view coordinates; resolves crop/rotation/mirroring (SPEC 60). */
     suspend fun focusAt(point: NormalizedPoint)
 

@@ -31,8 +31,6 @@ object DngReader {
     private const val TAG_BITS_PER_SAMPLE = 258
     private const val TAG_COMPRESSION = 259
     private const val TAG_PHOTOMETRIC = 262
-    private const val TAG_MAKE = 271
-    private const val TAG_MODEL = 272
     private const val TAG_ORIENTATION = 274
     private const val TAG_STRIP_OFFSETS = 273
     private const val TAG_SAMPLES_PER_PIXEL = 277
@@ -317,13 +315,15 @@ object DngReader {
             raf.readFully(buf)
             val bb = ByteBuffer.wrap(buf).order(order)
             val n = byteCount / bytesPerPixel
-            for (j in 0 until n) {
-                if (written >= total) break
-                out[written++] = if (bytesPerPixel == 2) {
-                    bb.getShort(j * 2)
-                } else {
-                    (bb.get(j).toInt() and 0xFF).toShort()
-                }
+            val take = minOf(n, total - written)
+            if (take <= 0) break
+            if (bytesPerPixel == 2) {
+                // Bulk copy: the per-short loop this replaces dominated the decode.
+                bb.asShortBuffer().get(out, written, take)
+                written += take
+            } else {
+                val bytes = bb.array()
+                for (j in 0 until take) out[written++] = (bytes[j].toInt() and 0xFF).toShort()
             }
         }
         if (written != total) throw DngFormatException("Pixel data short: $written != $total")

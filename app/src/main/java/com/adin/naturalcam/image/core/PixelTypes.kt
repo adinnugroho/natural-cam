@@ -132,23 +132,50 @@ class BayerImage(
     val width: Int,
     val height: Int,
     val cfa: CfaLayout,
-    val values: FloatArray,
+    values: FloatArray,
 ) {
+    var values: FloatArray = values
+        private set
+
     init {
         require(values.size == width * height)
     }
 
-    private val cfaPattern = intArrayOf(
-        cfa.channelAt(0, 0),
-        cfa.channelAt(1, 0),
-        cfa.channelAt(0, 1),
-        cfa.channelAt(1, 1),
-    )
+    /**
+     * Drops the mosaic once demosaic has read it (AGENTS 45: every frame has an
+     * explicit owner). At 12 MP this one array is ~46 MB, allocated before the
+     * three-channel [RgbImage]; keeping it live through the rest of the develop
+     * only shortens the window in which that memory can be reclaimed.
+     */
+    fun releasePixels() {
+        values = EmptyPixels
+    }
 
-    fun channelAt(x: Int, y: Int): Int = cfaPattern[((y and 1) shl 1) + (x and 1)]
+    private companion object {
+        val EmptyPixels = FloatArray(0)
+    }
+}
 
-    /** [c00, c01, c10, c11] channels of the 2x2 CFA tile. */
-    fun channelPattern(): IntArray = cfaPattern.copyOf()
+/**
+ * Bilinear sample of a coarse gain grid. [low]/[high]/[fracX] are the column
+ * indices and fraction precomputed for a pixel, [baseLow]/[baseHigh] the row
+ * offsets into the flat grid. Shared by the lens-shading corrector and the chroma
+ * smoother so both interpolate the same gain the same way.
+ */
+internal fun bilinearGridGain(
+    grid: FloatArray,
+    baseLow: Int,
+    baseHigh: Int,
+    low: Int,
+    high: Int,
+    fracX: Float,
+    fracY: Float,
+): Float {
+    val topLeft = grid[baseLow + low]
+    val top = topLeft + (grid[baseLow + high] - topLeft) * fracX
+    val bottomLeft = grid[baseHigh + low]
+    val bottom = bottomLeft + (grid[baseHigh + high] - bottomLeft) * fracX
+    return top + (bottom - top) * fracY
 }
 
 /**
@@ -156,12 +183,35 @@ class BayerImage(
  * light-based operations (AGENTS 22).
  */
 class RgbImage(val width: Int, val height: Int) {
-    val r: FloatArray = FloatArray(width * height)
-    val g: FloatArray = FloatArray(width * height)
-    val b: FloatArray = FloatArray(width * height)
+    var r: FloatArray = FloatArray(width * height)
+        private set
+    var g: FloatArray = FloatArray(width * height)
+        private set
+    var b: FloatArray = FloatArray(width * height)
+        private set
 
     init {
         require(width > 0 && height > 0)
+    }
+
+    /**
+     * Drops the pixel buffers once a stage has converted them (AGENTS 45: every frame
+     * has an explicit owner). At 12 MP these three arrays are ~151 MB, and the ARGB
+     * output, the rotation buffer and the encoder's bitmap are all allocated after the
+     * output transform — keeping the floats live through that window is what pushes a
+     * phone heap into a collection during the last stages of a develop.
+     *
+     * Only the pipeline calls this, after `OutputTransformer`; anything that still needs
+     * pixels must read them first.
+     */
+    fun releasePixels() {
+        r = EmptyPixels
+        g = EmptyPixels
+        b = EmptyPixels
+    }
+
+    private companion object {
+        val EmptyPixels = FloatArray(0)
     }
 }
 

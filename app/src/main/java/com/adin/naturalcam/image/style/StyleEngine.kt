@@ -8,7 +8,9 @@ import com.adin.naturalcam.image.processing.BloomStage
 import com.adin.naturalcam.image.processing.ChromaSmoother
 
 import com.adin.naturalcam.image.core.RgbImage
+import com.adin.naturalcam.image.core.luminance
 import com.adin.naturalcam.domain.StylePoint
+import com.adin.naturalcam.domain.StylePresets
 import com.adin.naturalcam.domain.StyleState
 import kotlin.math.abs
 import kotlin.math.exp
@@ -42,8 +44,12 @@ object StyleEngine {
         val (paletteX, paletteY) = shapeXY(style.palette)
         return ResolvedStyle(
             // TONE: x = soft→hard contrast, y = lifted→deeper (STYLE_PLAN 8.2).
+            // Both signs are read straight from the pad: +x expands around the pivot
+            // (firmer), +y lifts the shadows. The previous negation made every tone
+            // pad do the opposite of its documented direction — a pad moved toward
+            // "firm/deep" compressed contrast and brightened shadows instead.
             toneContrast = 0.12f * toneX * s,
-            midtoneLift = 0.08f * -toneY * s,
+            midtoneLift = 0.08f * toneY * s,
             shoulderStrength = 0.35f * toneX * s,
             // COLOR: x = cool→warm, y = muted→richer (STYLE_PLAN 9.2).
             temperature = 0.10f * colorX * s,
@@ -62,6 +68,24 @@ object StyleEngine {
     internal fun shape(value: Float): Float = value * abs(value)
 
     internal fun shapeXY(point: StylePoint) = Pair(shape(point.x), shape(point.y))
+
+    /**
+     * One-line debug description of a style state and everything it resolves to, for the
+     * capture log (STYLE_PLAN 37): which built-in preset the pads correspond to, the pads
+     * themselves, the independent amounts, and every resolved parameter. Values only —
+     * never pixel data (AGENTS 55).
+     */
+    fun describe(style: StyleState): String {
+        val p = resolve(style)
+        val preset = StylePresets.entries.firstOrNull { it.matches(style) }?.id ?: "custom"
+        return "$preset-v${style.version} tone=${style.tone.x}/${style.tone.y} " +
+            "color=${style.color.x}/${style.color.y} palette=${style.palette.x}/${style.palette.y} " +
+            "strength=${style.strength} bloom=${style.bloom} grain=${style.grain} " +
+            "saturation=${style.saturation} | contrast=${p.toneContrast} midLift=${p.midtoneLift} " +
+            "shoulder=${p.shoulderStrength} temp=${p.temperature} chroma=${p.chromaScale} " +
+            "compress=${p.chromaCompression} hue=${p.paletteHueShift} " +
+            "boost=${p.paletteChromaBoost} tint=${p.shadowHueTint}"
+    }
 
     /**
      * Applies the style chain: a light strength-scaled denoise, the pad style, and
@@ -118,7 +142,7 @@ object StyleEngine {
                 val r = rgb.r[i]
                 val g = rgb.g[i]
                 val b = rgb.b[i]
-                val l = 0.2126f * r + 0.7152f * g + 0.0722f * b
+                val l = luminance(r, g, b)
                 rgb.r[i] = (l + (r - l) * scale).coerceAtLeast(0f)
                 rgb.g[i] = (l + (g - l) * scale).coerceAtLeast(0f)
                 rgb.b[i] = (l + (b - l) * scale).coerceAtLeast(0f)
@@ -128,7 +152,11 @@ object StyleEngine {
 
     /** Tone style via bounded tone-curve deltas (STYLE_PLAN 8.3); monotonic by construction. */
     private fun applyTone(rgb: RgbImage, params: ResolvedStyle) {
-        val contrastK = 1f - params.toneContrast
+        // Neutral pads resolve to zero deltas; the pass below would then be an identity
+        // that still walks three full-resolution channel arrays.
+        if (params.toneContrast == 0f && params.midtoneLift == 0f && params.shoulderStrength == 0f) return
+        // A firmer pad (+x) must expand the range around the pivot, not compress it.
+        val contrastK = 1f + params.toneContrast
         val lift = params.midtoneLift
         val shoulder = params.shoulderStrength
         CpuParallel.forEach(rgb.r.size) { start, end ->
@@ -136,13 +164,16 @@ object StyleEngine {
                 var r = rgb.r[i]
                 var g = rgb.g[i]
                 var b = rgb.b[i]
-                // Midtone lift/deepen as a bounded luminance-dependent gain.
+                // Midtone lift/deepen as a bounded luminance-dependent gain. Lifting
+                // (y > 0) raises only the shadows; deepening (y < 0) lowers the
+                // midtones and highlights only, so the black point and the deep
+                // shadow texture are never crushed (STYLE_PLAN 8.4).
                 if (lift > 0f && r < 0.35f) r *= 1f + lift * (1f - r / 0.35f)
-                if (lift < 0f && r > 0.30f) r -= lift * (1f - (1f - r) / 0.70f)
+                if (lift < 0f && r > 0.30f) r += lift * (1f - (1f - r) / 0.70f)
                 if (lift > 0f && g < 0.35f) g *= 1f + lift * (1f - g / 0.35f)
-                if (lift < 0f && g > 0.30f) g -= lift * (1f - (1f - g) / 0.70f)
+                if (lift < 0f && g > 0.30f) g += lift * (1f - (1f - g) / 0.70f)
                 if (lift > 0f && b < 0.35f) b *= 1f + lift * (1f - b / 0.35f)
-                if (lift < 0f && b > 0.30f) b -= lift * (1f - (1f - b) / 0.70f)
+                if (lift < 0f && b > 0.30f) b += lift * (1f - (1f - b) / 0.70f)
                 // Contrast around the 0.18 linear pivot (STYLE_PLAN 8.3).
                 r = 0.18f + (r - 0.18f) * contrastK
                 g = 0.18f + (g - 0.18f) * contrastK
@@ -207,9 +238,13 @@ object StyleEngine {
                 val shadowWeight = exp(-l * 2f) * 0.35f * chromaWeight
                 newR += params.shadowHueTint * shadowWeight
                 newB -= params.shadowHueTint * shadowWeight
+                // A boost is a factor above 1 on the chroma offset: using the small
+                // boost value *as* the factor collapsed R and B chroma to ~1% of
+                // their offset, i.e. any nonzero palette X turned the frame grey.
                 if (params.paletteChromaBoost > 0f) {
-                    newR = l + (newR - l) * params.paletteChromaBoost
-                    newB = l + (newB - l) * params.paletteChromaBoost
+                    val boost = 1f + params.paletteChromaBoost
+                    newR = l + (newR - l) * boost
+                    newB = l + (newB - l) * boost
                 }
                 rgb.r[i] = newR.coerceAtLeast(0f)
                 rgb.b[i] = newB.coerceAtLeast(0f)
@@ -217,5 +252,3 @@ object StyleEngine {
         }
     }
 }
-
-internal fun luminance(r: Float, g: Float, b: Float): Float = 0.2126f * r + 0.7152f * g + 0.0722f * b

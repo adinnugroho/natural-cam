@@ -1,14 +1,18 @@
 package com.adin.naturalcam.storage
 
+import android.content.ContentResolver
 import android.content.ContentUris
-import android.content.Context
 import android.provider.MediaStore
 import com.adin.naturalcam.domain.SavedPhoto
 
-/** Reads the newest app-owned photo so camera UI survives process/activity recreation. */
-class LatestPhotoReader(private val context: Context) {
+/**
+ * Reads the newest app-owned photo so camera UI survives process/activity recreation.
+ * Takes the resolver rather than a Context: this object is held by the ViewModel, and
+ * a Context field there is a leak the linter (rightly) flags.
+ */
+class LatestPhotoReader(private val contentResolver: ContentResolver) {
 
-    fun read(): SavedPhoto? = readMime(JPEG_MIME) ?: readMime(DNG_MIME)
+    fun read(): SavedPhoto? = readMime(StoragePaths.JPEG_MIME) ?: readMime(StoragePaths.DNG_MIME)
 
     private fun readMime(mimeType: String): SavedPhoto? {
         val projection = arrayOf(
@@ -20,11 +24,11 @@ class LatestPhotoReader(private val context: Context) {
         )
         val selection = "${MediaStore.Images.Media.MIME_TYPE} = ? AND " +
             "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-        val args = arrayOf(mimeType, "$RELATIVE_PATH%")
+        val args = arrayOf(mimeType, StoragePaths.RELATIVE_PATH_LIKE)
         val sort = "${MediaStore.Images.Media.DATE_TAKEN} DESC, " +
             "${MediaStore.Images.Media.DATE_ADDED} DESC"
 
-        context.contentResolver.query(
+        contentResolver.query(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             projection,
             selection,
@@ -42,11 +46,5 @@ class LatestPhotoReader(private val context: Context) {
             )
         }
         return null
-    }
-
-    private companion object {
-        const val RELATIVE_PATH = "Pictures/NaturalCamera"
-        const val JPEG_MIME = "image/jpeg"
-        const val DNG_MIME = "image/x-adobe-dng"
     }
 }

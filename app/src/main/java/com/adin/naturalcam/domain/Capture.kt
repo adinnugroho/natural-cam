@@ -47,11 +47,15 @@ enum class CaptureLimitation {
     PREVIEW_MAY_DIFFER,
 }
 
-/** Least-aggressive ISP request the resolver settled on (SPEC 23). */
+/**
+ * Least-aggressive ISP request the resolver settled on (SPEC 23). HDR is not
+ * modelled here: vendor auto-HDR toggles are not exposed through public capture
+ * controls, so the honest record is [CaptureLimitation.HDR_CONTROL_UNAVAILABLE]
+ * (AGENTS 12).
+ */
 data class IspConfiguration(
     val noiseReduction: NoiseReductionMode,
     val edgeMode: EdgeMode,
-    val hdrDisabled: Boolean,
 )
 
 /** Concrete capture decision (SPEC 20). Built only by CapturePathResolver. */
@@ -94,6 +98,14 @@ data class PhotoCaptureRequest(
     val exposureMode: ExposureMode,
     val focusMode: FocusMode,
     val flashMode: FlashMode,
+    /** Delivered aspect ratio; the develop crops to it (SPEC 66 framing must not surprise). */
+    val aspectRatio: AspectRatio = AspectRatio.RATIO_FULL,
+    /**
+     * Zoom the framing is composed with. Below 1x a *wider* physical camera is engaged behind
+     * the logical camera, and RAW is not exposed for it, so the capture plan must not use RAW
+     * (SPEC 96 names the case; see [CapturePathResolver]).
+     */
+    val zoomRatio: Float = 1f,
     /** Normalized NATURAL white-balance temperature adjustment in [-1, 1]. */
     val temperature: Float = 0f,
     /** Selected creative style; consumed by NATURAL only (STYLE_PLAN 27/28). */

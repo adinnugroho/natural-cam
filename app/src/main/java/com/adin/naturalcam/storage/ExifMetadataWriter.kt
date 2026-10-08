@@ -16,8 +16,11 @@ import kotlin.math.roundToInt
  */
 object ExifMetadataWriter {
 
+    /** EXIF-applied bytes plus the dimensions from the same parse (avoids re-reading multi-MB buffers). */
+    data class Result(val bytes: ByteArray, val width: Int, val height: Int)
+
     @Suppress("DEPRECATION") // TAG_ISO_SPEED_RATINGS is the tag the contract names.
-    fun apply(bytes: ByteArray, metadata: CaptureMetadata, locationTagging: Boolean): ByteArray {
+    fun apply(bytes: ByteArray, metadata: CaptureMetadata, locationTagging: Boolean): Result {
         // ExifInterface.saveAttributes() only writes to a file path or seekable FD —
         // a stream-only instance throws IOException — so bytes round-trip through a
         // temp file that is always deleted (AGENTS 51).
@@ -55,7 +58,11 @@ object ExifMetadataWriter {
             }
 
             exif.saveAttributes()
-            return file.readBytes()
+            return Result(
+                bytes = file.readBytes(),
+                width = exif.getAttributeInt(ExifInterface.TAG_IMAGE_WIDTH, 0),
+                height = exif.getAttributeInt(ExifInterface.TAG_IMAGE_LENGTH, 0),
+            )
         } finally {
             file.delete()
         }

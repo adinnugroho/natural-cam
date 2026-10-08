@@ -46,6 +46,13 @@ data class CameraCapabilities(
     val exposureCompensationStepEv: Float,
     val minimumFocusDistanceDiopters: Float?,
     val focalLengthsMm: List<Float>,
+    /**
+     * Zoom ratio range reported by the camera (`android.control.zoomRatioRange`). A start
+     * below 1 means a *wider* physical camera is engaged behind this one, which is how a
+     * wide-angle framing is reached on a logical multi-camera (AGENTS 10 — per camera, from
+     * metadata, never inferred from the model name).
+     */
+    val zoomRatioRange: ClosedFloatingPointRange<Float>?,
     val flashAvailable: Boolean,
     val opticalStabilizationSupported: Boolean,
     val sensorOrientation: Int,

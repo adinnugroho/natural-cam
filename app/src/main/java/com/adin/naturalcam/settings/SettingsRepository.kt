@@ -74,7 +74,7 @@ private val KEY_GRID = booleanPreferencesKey("grid")
 private val KEY_STYLE = stringPreferencesKey("style")
 private val KEY_TEMPERATURE = androidx.datastore.preferences.core.floatPreferencesKey("temperature")
 
-/** Encoded as `version|toneX,toneY|colorX,colorY|paletteX,paletteY|strength|bloom|grain|saturation`. */
+/** Encoded as 11 pipe-separated fields: `version|toneX|toneY|colorX|colorY|paletteX|paletteY|strength|bloom|grain|saturation`. */
 internal fun encodeStyle(style: StyleState): String =
     listOf(
         style.version,

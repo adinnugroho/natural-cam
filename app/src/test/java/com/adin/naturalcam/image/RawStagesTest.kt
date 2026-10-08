@@ -84,10 +84,32 @@ class RawStagesTest {
             val h = 8
             val values = FloatArray(w * h) { i -> target[layout.channelAt(i % w, i / w)] }
             val rgb = Demosaicer.demosaic(BayerImage(w, h, layout, values))
+            assertTrue("$layout R has NaN", rgb.r.none { it.isNaN() })
+            assertTrue("$layout G has NaN", rgb.g.none { it.isNaN() })
+            assertTrue("$layout B has NaN", rgb.b.none { it.isNaN() })
             for (i in values.indices) {
                 assertEquals(layout.toString(), target[0], rgb.r[i], 1e-5f)
                 assertEquals(layout.toString(), target[1], rgb.g[i], 1e-5f)
                 assertEquals(layout.toString(), target[2], rgb.b[i], 1e-5f)
+            }
+        }
+    }
+
+    @Test
+    fun `demosaic never leaks the NaN sentinel on odd sizes`() {
+        val target = floatArrayOf(0.2f, 0.5f, 0.8f)
+        // Odd in both axes: the border fallbacks that use the NaN sentinel are all
+        // exercised, and a sentinel surviving would poison every later stage.
+        for (layout in CfaLayout.entries) for ((w, h) in listOf(7 to 5, 5 to 7, 9 to 3)) {
+            val values = FloatArray(w * h) { i -> target[layout.channelAt(i % w, i / w)] }
+            val rgb = Demosaicer.demosaic(BayerImage(w, h, layout, values))
+            assertTrue("$layout ${w}x$h R has NaN", rgb.r.none { it.isNaN() })
+            assertTrue("$layout ${w}x$h G has NaN", rgb.g.none { it.isNaN() })
+            assertTrue("$layout ${w}x$h B has NaN", rgb.b.none { it.isNaN() })
+            for (i in values.indices) {
+                assertEquals("$layout ${w}x$h R[$i]", target[0], rgb.r[i], 1e-5f)
+                assertEquals("$layout ${w}x$h G[$i]", target[1], rgb.g[i], 1e-5f)
+                assertEquals("$layout ${w}x$h B[$i]", target[2], rgb.b[i], 1e-5f)
             }
         }
     }

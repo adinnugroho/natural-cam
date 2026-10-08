@@ -1,5 +1,6 @@
 package com.adin.naturalcam.image.core
 
+import com.adin.naturalcam.domain.AspectRatio
 import com.adin.naturalcam.domain.ProcessingProfile
 import com.adin.naturalcam.domain.StyleState
 
@@ -147,14 +148,26 @@ data class ProcessingConfiguration(
     val tone: ToneConfig = ToneConfig(),
     /** Creative style state applied after NATURAL base processing (STYLE_PLAN 15). */
     val style: StyleState = StyleState(),
-    /** NATURAL-v13 preserves luminance grain; only chroma denoise is enabled. */
+    /**
+     * Aspect ratio of the delivered image. Geometry only — the crop keeps pixels of the
+     * same rendering untouched — so it is not part of the processing recipe and does not
+     * affect [pipelineVersion]. [domain.AspectRatio.RATIO_FULL] means "the sensor's frame".
+     */
+    val outputAspect: AspectRatio = AspectRatio.RATIO_FULL,
+    /**
+     * Strength of the 2x2 block chroma pass of `NoiseReducer` (the `reduce`
+     * stage). 0 for every built-in profile — NATURAL cleans chroma with
+     * [chromaSmoothStrength] instead — but the stage is a real, testable knob.
+     */
     val chromaDenoiseStrength: Float = 0f,
     /** Base strength for the half-resolution chroma smoother; the shading gain adds to it. */
     val chromaSmoothStrength: Float = 0f,
+    /** Luma strength of the same 2x2 block pass; 0 for every built-in profile. */
     val lumaDenoiseStrength: Float = 0f,
     /**
-     * Smooth 3x3 luma-only denoise. Separate from [lumaDenoiseStrength], whose
-     * 2x2 kernel is block-periodic and only survives in the style chain.
+     * Smooth 3x3 luma-only denoise ([LumaDenoiser]). Distinct from
+     * [lumaDenoiseStrength], whose 2x2 block kernel belongs to the `reduce`
+     * stage and is block-periodic.
      */
     val lumaSmoothStrength: Float = 0f,
     /** Cored capture sharpening; see [Sharpener] for why the amount stays low. */
@@ -170,6 +183,7 @@ data class ProcessingConfiguration(
             jpegQuality: Int = 92,
             temperature: Float = 0f,
             style: StyleState = StyleState(),
+            aspectRatio: AspectRatio = AspectRatio.RATIO_FULL,
         ): ProcessingConfiguration =
             when (profile) {
                 ProcessingProfile.NATURAL -> ProcessingConfiguration(
@@ -177,6 +191,7 @@ data class ProcessingConfiguration(
                     pipelineVersion = PIPELINE_VERSION,
                     tone = ToneConfig(temperature = temperature.coerceIn(-1f, 1f)),
                     style = style,
+                    outputAspect = aspectRatio,
                     jpegQuality = jpegQuality,
                     chromaSmoothStrength = NATURAL_CHROMA_SMOOTH_STRENGTH,
                     lumaSmoothStrength = NATURAL_LUMA_SMOOTH_STRENGTH,
@@ -189,6 +204,7 @@ data class ProcessingConfiguration(
                     pipelineVersion = "pure-v2",
                     // Explicit: PURE never takes the NATURAL recipe lift or its warmth.
                     tone = ToneConfig(exposureStops = 0f, contrast = 0f, highlightCompression = 0f, warmth = 0f),
+                    outputAspect = aspectRatio,
                     chromaDenoiseStrength = 0f,
                     lumaDenoiseStrength = 0f,
                     sharpenAmount = 0f,
@@ -200,6 +216,7 @@ data class ProcessingConfiguration(
                     pipelineVersion = "system-passthrough",
                     // Explicit: SYSTEM never takes the NATURAL recipe lift or its warmth.
                     tone = ToneConfig(exposureStops = 0f, contrast = 0f, highlightCompression = 0f, warmth = 0f),
+                    outputAspect = aspectRatio,
                     chromaDenoiseStrength = 0f,
                     lumaDenoiseStrength = 0f,
                     sharpenAmount = 0f,

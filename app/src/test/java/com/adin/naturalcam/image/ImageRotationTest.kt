@@ -61,6 +61,31 @@ class ImageRotationTest {
         )
     }
 
+    /**
+     * Tiled path (images larger than one 32px tile, non-multiple dimensions):
+     * every pixel is checked against the documented index mapping.
+     */
+    @Test
+    fun `tiled rotation maps every pixel of an odd sized image`() {
+        val w = 70
+        val h = 45
+        val src = IntArray(w * h) { i -> (i / w) * 1000 + (i % w) }
+
+        val cw90 = ImageRotation.rotate(src, w, h, 90)
+        assertEquals(h, cw90.width)
+        assertEquals(w, cw90.height)
+        val cw270 = ImageRotation.rotate(src, w, h, 270)
+        val cw180 = ImageRotation.rotate(src, w, h, 180)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val value = src[y * w + x]
+                assertEquals(value, cw90.argb[(h - 1 - y) + x * h])
+                assertEquals(value, cw270.argb[y + (w - 1 - x) * h])
+                assertEquals(value, cw180.argb[(w - 1 - x) + (h - 1 - y) * w])
+            }
+        }
+    }
+
     @Test
     fun `four quarter turns return to original`() {
         var pixels = src()

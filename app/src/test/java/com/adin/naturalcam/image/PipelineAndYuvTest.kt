@@ -4,8 +4,6 @@ import com.adin.naturalcam.domain.ProcessingProfile
 import com.adin.naturalcam.domain.StyleState
 import com.adin.naturalcam.image.core.CfaLayout
 import com.adin.naturalcam.image.core.DefaultImagePipeline
-import com.adin.naturalcam.image.core.EncodedImage
-import com.adin.naturalcam.image.core.JpegEncoder
 import com.adin.naturalcam.image.core.ProcessingConfiguration
 import com.adin.naturalcam.image.core.RawCaptureMetadata
 import com.adin.naturalcam.image.core.RawImage
@@ -16,20 +14,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PipelineAndYuvTest {
-
-    private class RecordingEncoder : JpegEncoder {
-        var calls = 0
-        var lastWidth = 0
-        var lastHeight = 0
-        var lastQuality = 0
-        override fun encode(argb: IntArray, width: Int, height: Int, quality: Int): EncodedImage {
-            calls++
-            lastWidth = width
-            lastHeight = height
-            lastQuality = quality
-            return EncodedImage(ByteArray(argb.size * 4) { 0 }, width, height)
-        }
-    }
 
     private fun rawMeta(cfa: CfaLayout) = RawCaptureMetadata(
         cfa = cfa,
@@ -179,16 +163,9 @@ class PipelineAndYuvTest {
 
     @Test
     fun `bloom style adds a visible halo around highlights in the encoded image`() {
-        class PixelEncoder : JpegEncoder {
-            var argb = IntArray(0)
-            override fun encode(argb: IntArray, width: Int, height: Int, quality: Int): EncodedImage {
-                this.argb = argb.copyOf()
-                return EncodedImage(ByteArray(argb.size * 4), width, height)
-            }
-        }
         val size = 128
         fun render(bloom: Float): IntArray {
-            val encoder = PixelEncoder()
+            val encoder = RecordingEncoder()
             val pipeline = DefaultImagePipeline(encoder)
             pipeline.processYuv(
                 scene(size),
@@ -214,17 +191,10 @@ class PipelineAndYuvTest {
 
     @Test
     fun `grain adds luma texture without adding chroma noise`() {
-        class PixelEncoder : JpegEncoder {
-            var argb: IntArray = IntArray(0)
-            override fun encode(argb: IntArray, width: Int, height: Int, quality: Int): EncodedImage {
-                this.argb = argb.copyOf()
-                return EncodedImage(ByteArray(argb.size * 4), width, height)
-            }
-        }
         val size = 96
 
         fun render(grain: Float, strength: Float = 1f): IntArray {
-            val encoder = PixelEncoder()
+            val encoder = RecordingEncoder()
             DefaultImagePipeline(encoder).processYuv(
                 coloredNoiseScene(size),
                 ProcessingConfiguration.forProfile(

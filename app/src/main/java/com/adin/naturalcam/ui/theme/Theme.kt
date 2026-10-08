@@ -18,8 +18,10 @@ val CameraBlack = Color(0xFF101010)
 val CameraWhite = Color(0xFFDCDCDA)
 val CameraOrange = Color(0xFFE0AE33)
 val CameraControl = Color(0xFF101010)
-val CameraOverlay = Color(0xF0101010)
 val CameraMuted = Color(0xFF8E8E8A)
+
+/** Capture-failure / error-notice fill; distinct from the muted scheme `error` (AGENTS: honest failures). */
+val CameraError = Color(0xFFE64A35)
 
 /** Soft-UI material: base panel, light source, and shadow side (neutral greys). */
 val NeumBase = Color(0xFF171717)

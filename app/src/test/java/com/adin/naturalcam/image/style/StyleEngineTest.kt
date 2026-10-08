@@ -3,7 +3,9 @@ package com.adin.naturalcam.image.style
 import com.adin.naturalcam.domain.StylePresets
 import com.adin.naturalcam.domain.StylePoint
 import com.adin.naturalcam.domain.StyleState
+import com.adin.naturalcam.domain.StyleVersion
 
+import com.adin.naturalcam.image.TestImages
 import com.adin.naturalcam.image.core.RgbImage
 import com.adin.naturalcam.image.core.SATURATION_RANGE
 import org.junit.Assert.assertEquals
@@ -11,28 +13,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class StyleEngineTest {
-
-    private fun uniformImage(size: Int = 256, value: Float = 0.30f): RgbImage =
-        RgbImage(size, size).also { rgb ->
-            for (i in rgb.r.indices) {
-                rgb.r[i] = value
-                rgb.g[i] = value
-                rgb.b[i] = value
-            }
-        }
-
-    /** Deterministic pseudo-random image in [0,1] (fixed LCG seed). */
-    private fun randomImage(size: Int): RgbImage {
-        val rgb = RgbImage(size, size)
-        var seed = 987654321L
-        for (i in rgb.r.indices) {
-            for (channel in arrayOf(rgb.r, rgb.g, rgb.b)) {
-                seed = (seed * 1103515245 + 12345) and 0x7FFFFFFF
-                channel[i] = (seed % 1000) / 1000f
-            }
-        }
-        return rgb
-    }
 
     /** Mean absolute horizontal step: a proxy for high-frequency noise energy. */
     private fun fineEnergy(channel: FloatArray, width: Int): Float {
@@ -182,11 +162,11 @@ class StyleEngineTest {
 
     @Test
     fun `saturation leaves neutral gray neutral`() {
-        val gray = uniformImage(value = 0.4f)
+        val gray = TestImages.uniform(value = 0.4f)
         val before = gray.r.copyOf()
         StyleEngine.apply(gray, StyleState(saturation = 1f))
         assertEquals(before.toList(), gray.r.toList())
-        val again = uniformImage(value = 0.4f)
+        val again = TestImages.uniform(value = 0.4f)
         StyleEngine.apply(again, StyleState(saturation = -1f))
         assertEquals(before.toList(), again.r.toList())
     }
@@ -207,7 +187,7 @@ class StyleEngineTest {
 
     @Test
     fun `style chain denoises at strength above zero and not at zero`() {
-        val noisy = randomImage(64)
+        val noisy = TestImages.randomImage(64)
         val reference = Triple(noisy.r.copyOf(), noisy.g.copyOf(), noisy.b.copyOf())
 
         StyleEngine.apply(noisy, StyleState())
@@ -217,7 +197,7 @@ class StyleEngineTest {
             fineEnergy(after.first, 64) < 0.85f * fineEnergy(reference.first, 64),
         )
 
-        val untouched = randomImage(64)
+        val untouched = TestImages.randomImage(64)
         val zeroReference = untouched.r.copyOf()
         StyleEngine.apply(untouched, StyleState(tone = StylePoint(0.8f, -0.8f), strength = 0f))
         assertEquals(zeroReference.toList(), untouched.r.toList())
@@ -279,19 +259,19 @@ class StyleEngineTest {
         val natural = StylePresets.entries.single { it.id == "natural" }
         assertTrue(natural.matches(StyleState(grain = 1f, strength = 0.4f)))
 
-        val flat = uniformImage(value = 0.30f)
+        val flat = TestImages.uniform(value = 0.30f)
         val reference = flat.r.copyOf()
         StyleEngine.apply(flat, StyleState(grain = 1f, strength = 0f))
         assertEquals(reference.toList(), flat.r.toList())
 
-        val styled = uniformImage(value = 0.30f)
+        val styled = TestImages.uniform(value = 0.30f)
         val unchanged = styled.r.copyOf()
         StyleEngine.apply(styled, StyleState(grain = 1f))
         assertEquals(unchanged.toList(), styled.r.toList())
     }
     @Test
     fun `neutral gray stays neutral under tone and color`() {
-        val rgb = uniformImage(value = 0.35f)
+        val rgb = TestImages.uniform(value = 0.35f)
         val out = StyleEngine.apply(
             rgb,
             StyleState(tone = StylePoint(0.6f, 0.4f), color = StylePoint(-0.8f, 0.3f), palette = StylePoint(0.8f, 0.8f)),
@@ -314,6 +294,158 @@ class StyleEngineTest {
             assertTrue(out.g[i].isFinite() && out.g[i] >= 0f)
             assertTrue(out.b[i].isFinite() && out.b[i] >= 0f)
         }
+    }
+
+    // --- Warm Street (FILM_STYLE.md) -------------------------------------------------------
+
+    private fun patch(r: Float, g: Float, b: Float, size: Int = 32): RgbImage =
+        RgbImage(size, size).also { rgb ->
+            for (i in rgb.r.indices) {
+                rgb.r[i] = r
+                rgb.g[i] = g
+                rgb.b[i] = b
+            }
+        }
+
+    private fun styled(state: StyleState, r: Float, g: Float, b: Float): RgbImage =
+        patch(r, g, b).also { StyleEngine.apply(it, state) }
+
+    private fun warmStreet(strength: Float = 1f): StyleState =
+        StylePresets.entries.single { it.id == "warm_street" }.state.copy(strength = strength)
+
+    private fun hueDegrees(image: RgbImage): Float {
+        val r = image.r[0]
+        val g = image.g[0]
+        val b = image.b[0]
+        val max = maxOf(r, g, b)
+        val delta = max - minOf(r, g, b)
+        if (delta < 1e-6f) return 0f
+        val raw = when (max) {
+            r -> ((g - b) / delta) % 6f
+            g -> (b - r) / delta + 2f
+            else -> (r - g) / delta + 4f
+        } * 60f
+        return if (raw < 0f) raw + 360f else raw
+    }
+
+    @Test
+    fun `warm street preset is registered with the current mapping version`() {
+        val preset = StylePresets.entries.single { it.id == "warm_street" }
+
+        assertEquals("Warm Street", preset.name)
+        assertEquals(StyleVersion.V2.code, preset.state.version)
+        assertEquals(StylePoint(0.30f, -0.50f), preset.state.tone)
+        assertEquals(StylePoint(0.40f, -0.35f), preset.state.color)
+        assertEquals(StylePoint(-0.25f, 0.45f), preset.state.palette)
+        // A preset moves the pads only: the independent amounts stay neutral.
+        assertEquals(0f, preset.state.bloom, 0f)
+        assertEquals(0f, preset.state.grain, 0f)
+        assertEquals(0f, preset.state.saturation, 0f)
+    }
+
+    @Test
+    fun `warm street at strength zero is exactly natural`() {
+        val rgb = colorImage(64)
+        val before = Triple(rgb.r.copyOf(), rgb.g.copyOf(), rgb.b.copyOf())
+        StyleEngine.apply(rgb, warmStreet(strength = 0f))
+        assertEquals(before.first.toList(), rgb.r.toList())
+        assertEquals(before.second.toList(), rgb.g.toList())
+        assertEquals(before.third.toList(), rgb.b.toList())
+    }
+
+    @Test
+    fun `tone pad firms the black point and deepens the midtones, and reverses on the other side`() {
+        // +x = firmer: a value below the 0.18 pivot darkens; -x = softer: it brightens.
+        assertTrue(styled(StyleState(tone = StylePoint(0.5f, 0f)), 0.026f, 0.026f, 0.026f).r[0] < 0.026f)
+        assertTrue(styled(StyleState(tone = StylePoint(-0.5f, 0f)), 0.026f, 0.026f, 0.026f).r[0] > 0.026f)
+
+        // -y = deeper: midtones lose density, and the deep shadows are untouched.
+        assertTrue(styled(StyleState(tone = StylePoint(0f, -0.5f)), 0.50f, 0.50f, 0.50f).r[0] < 0.50f)
+        assertEquals(0.10f, styled(StyleState(tone = StylePoint(0f, -0.5f)), 0.10f, 0.10f, 0.10f).r[0], 1e-6f)
+
+        // +y = lifted: shadows rise, midtones stay.
+        assertTrue(styled(StyleState(tone = StylePoint(0f, 0.5f)), 0.10f, 0.10f, 0.10f).r[0] > 0.10f)
+        assertEquals(0.50f, styled(StyleState(tone = StylePoint(0f, 0.5f)), 0.50f, 0.50f, 0.50f).r[0], 1e-6f)
+    }
+
+    @Test
+    fun `tone curve stays monotonic at the pad extremes`() {
+        var previous = -1f
+        var level = 0.02f
+        while (level <= 1f) {
+            val out = styled(StyleState(tone = StylePoint(1f, -1f)), level, level, level).r[0]
+            assertTrue("tone response inverted at $level: $out after $previous", out > previous)
+            previous = out
+            level += 0.01f
+        }
+    }
+
+    @Test
+    fun `palette green lean turns green olive without collapsing chroma`() {
+        // Regression: the chroma boost was used as the chroma factor itself, so any
+        // nonzero palette X scaled R and B chroma to ~1% of its offset and greyed the
+        // frame out. Green must lean olive (red up, blue down) and keep its chroma.
+        val natural = patch(0.10f, 0.28f, 0.09f)
+        val olive = styled(StyleState(palette = StylePoint(-0.5f, 0f)), 0.10f, 0.28f, 0.09f)
+
+        assertTrue("green chroma collapsed: ${olive.r[0]} ${olive.g[0]} ${olive.b[0]}", olive.g[0] - minOf(olive.r[0], olive.b[0]) > 0.15f)
+        assertTrue("olive must lean red", olive.r[0] > natural.r[0])
+        assertTrue("olive must drop blue", olive.b[0] < natural.b[0])
+        assertEquals("green stays green", natural.g[0], olive.g[0], 1e-6f)
+    }
+
+    @Test
+    fun `warm street keeps neutral surfaces neutral`() {
+        for (level in floatArrayOf(0.026f, 0.30f, 0.72f)) {
+            val out = styled(warmStreet(), level, level, level)
+            assertEquals(out.r[0], out.g[0], 1e-6f)
+            assertEquals(out.g[0], out.b[0], 1e-6f)
+        }
+        // Deep shadows get firmer, but nothing is crushed to zero; the highlight stays put.
+        assertTrue(styled(warmStreet(), 0.026f, 0.026f, 0.026f).r[0] < 0.026f)
+        assertTrue(styled(warmStreet(), 0.026f, 0.026f, 0.026f).r[0] > 0.01f)
+        assertTrue(abs(styled(warmStreet(), 0.72f, 0.72f, 0.72f).r[0] / 0.72f - 1f) < 0.03f)
+    }
+
+    @Test
+    fun `warm street restrains blue without shifting its hue`() {
+        val natural = patch(0.18f, 0.32f, 0.72f)
+        val out = styled(warmStreet(), 0.18f, 0.32f, 0.72f)
+
+        assertTrue("blue is the dominant channel", out.b[0] == maxOf(out.r[0], out.g[0], out.b[0]))
+        assertTrue("blue chroma must be restrained", out.b[0] - out.r[0] < natural.b[0] - natural.r[0])
+        assertTrue("blue must stay saturated, not grey", out.b[0] - out.r[0] > 0.4f)
+        assertTrue("hue drifted", abs(hueDegrees(out) - hueDegrees(natural)) < 5f)
+        assertTrue("luminance must hold", abs(out.b[0] / natural.b[0] - 1f) < 0.05f)
+    }
+
+    @Test
+    fun `warm street keeps skin plausible`() {
+        val natural = patch(0.52f, 0.33f, 0.25f)
+        val out = styled(warmStreet(), 0.52f, 0.33f, 0.25f)
+
+        assertTrue("skin hue drifted out of range: ${hueDegrees(out)}", hueDegrees(out) in 10f..30f)
+        assertTrue("skin must not gain chroma", out.r[0] - out.b[0] < natural.r[0] - natural.b[0])
+        assertTrue("skin must keep its chroma", out.r[0] - out.b[0] > 0.9f * (natural.r[0] - natural.b[0]))
+        assertTrue("skin must not go pink or orange", out.r[0] > out.g[0] && out.g[0] > out.b[0])
+        assertTrue("skin luminance must hold", abs(out.g[0] / natural.g[0] - 1f) < 0.05f)
+    }
+
+    @Test
+    fun `debug description names the preset, its version and the applied parameters`() {
+        val line = StyleEngine.describe(warmStreet(strength = 0.6f))
+
+        assertTrue(line, line.startsWith("warm_street-v${StyleVersion.V2.code}"))
+        assertTrue(line, line.contains("strength=0.6"))
+        // The resolved contrast is the value the pixels are actually shaped with.
+        assertEquals(
+            StyleEngine.resolve(warmStreet(strength = 0.6f)).toneContrast.toString(),
+            line.split("contrast=")[1].split(" ")[0],
+        )
+        // An edited pad set is reported as custom rather than as the nearest preset.
+        assertTrue(
+            StyleEngine.describe(warmStreet().copy(tone = StylePoint(0.9f, 0f))).startsWith("custom-v"),
+        )
     }
 }
 

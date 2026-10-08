@@ -23,6 +23,12 @@ data class CameraUiState(
     val rawMode: RawMode = RawMode.FINAL_ONLY,
     val flashMode: FlashMode = FlashMode.OFF,
     val exposureCompensationEv: Float = 0f,
+    /**
+     * True while the framing is wider than 1x, i.e. a wider lens is engaged behind the current
+     * camera. Published only when the framing crosses 1x — every pinch frame would otherwise
+     * recompose the whole camera screen.
+     */
+    val wideAngleActive: Boolean = false,
     val temperature: Float = 0f,
     val aspectRatio: AspectRatio = AspectRatio.RATIO_4_3,
     val highestResolution: Boolean = false,
@@ -33,6 +39,8 @@ data class CameraUiState(
     val style: StyleState = StyleState(),
     val lastCapture: SavedPhoto? = null,
     val isShutterEnabled: Boolean = true,
+    /** Accepted captures still developing; the shutter stays live while this is below the bound. */
+    val jobsInFlight: Int = 0,
     val notice: UiNotice? = null,
 )
 
@@ -45,7 +53,6 @@ data class UiNotice(val message: String, val isError: Boolean)
 interface CameraActions {
     fun onShutter()
     fun onSelectLens(cameraId: CameraId, zoomRatio: Float = 1f)
-    fun onSelectProfile(profile: ProcessingProfile)
     fun onSetFlash(mode: FlashMode)
     fun onSetExposureCompensation(ev: Float)
     fun onSetTemperature(temperature: Float)
@@ -54,17 +61,13 @@ interface CameraActions {
     fun onSelectStylePreset(style: StyleState)
     /** Opens/closes the style workspace (used by the entry button and system back). */
     fun onSetStyleMode(enabled: Boolean)
-    fun onCycleTimer()
     fun onSetAspectRatio(aspectRatio: AspectRatio)
     fun onSetHighestResolution(enabled: Boolean)
-    fun onToggleGrid()
     /** xFraction/yFraction in view space [0,1]; ViewModel maps to metering points (SPEC 60). */
     fun onTapToFocus(xFraction: Float, yFraction: Float)
     fun onLockFocus(xFraction: Float, yFraction: Float)
     /** Continuous pinch zoom within the current lens (0 = reset to 1×). */
     fun onPinchZoom(zoomRatio: Float)
-    fun onOpenSettings()
-    fun onOpenDeviceInfo()
     fun onOpenGallery()
     fun onNoticeShown()
 }

@@ -1,5 +1,6 @@
 package com.adin.naturalcam.settings
 
+import com.adin.naturalcam.domain.StylePoint
 import com.adin.naturalcam.domain.StyleState
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -42,5 +43,39 @@ class SettingsRepositoryTest {
         assertEquals(0.45f, decoded.grain, 0f)
         assertEquals(0.2f, decoded.bloom, 0f)
         assertEquals(0.6f, decoded.strength, 0f)
+    }
+
+    @Test
+    fun `missing and malformed style fall back to defaults`() {
+        assertEquals(StyleState(), decodeStyle(null))
+        assertEquals(StyleState(), decodeStyle("junk"))
+    }
+
+    @Test
+    fun `out-of-range bloom and grain are clamped`() {
+        val high = decodeStyle("1|0|0|0|0|0|0|1|5|5|5")
+        assertEquals(1f, high.bloom, 0f)
+        assertEquals(1f, high.grain, 0f)
+        assertEquals(1f, high.saturation, 0f)
+
+        val low = decodeStyle("1|0|0|0|0|0|0|1|-3|-3|-9")
+        assertEquals(0f, low.bloom, 0f)
+        assertEquals(0f, low.grain, 0f)
+        assertEquals(-1f, low.saturation, 0f)
+    }
+
+    @Test
+    fun `full style round trips including tone color and palette`() {
+        val style = StyleState(
+            tone = StylePoint(0.5f, -0.5f),
+            color = StylePoint(0.2f, 0.4f),
+            palette = StylePoint(-0.3f, 0.8f),
+            strength = 0.9f,
+            bloom = 0.3f,
+            grain = 0.6f,
+            saturation = -0.4f,
+        )
+
+        assertEquals(style, decodeStyle(encodeStyle(style)))
     }
 }

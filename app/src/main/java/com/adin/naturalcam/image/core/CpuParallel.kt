@@ -14,6 +14,17 @@ internal object CpuParallel {
         Thread(runnable, "naturalcam-cpu").apply { isDaemon = true }
     })
 
+    /**
+     * Splits [size] into one equal chunk per core.
+     *
+     * Measured (Oppo CPH2737: 4x2.2 GHz + 4x3.2 GHz): handing the pool several chunks per
+     * core so the big cores can take the little cores' tail made no measurable difference
+     * on any stage — the capacity ratio here caps the possible win at ~1.26x, which is
+     * inside the per-capture spread. Revisit only with a device whose cores differ by 2x
+     * or more, and then measure it stage by stage.
+     *
+     * Not reentrant: a nested [forEach] from inside a worker would queue behind itself.
+     */
     fun forEach(
         size: Int,
         minItemsPerTask: Int = MIN_ITEMS_PER_TASK,

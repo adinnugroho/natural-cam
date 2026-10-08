@@ -25,21 +25,6 @@ import kotlin.math.abs
 
 class ToneAndFilterTest {
 
-    /** Deterministic pseudo-random image in [0,1] (fixed LCG seed). */
-    private fun randomImage(size: Int = 64): RgbImage {
-        val rgb = RgbImage(size, size)
-        var seed = 1234567L
-        for (i in rgb.r.indices) {
-            seed = (seed * 1103515245 + 12345) and 0x7FFFFFFF
-            rgb.r[i] = (seed % 1000) / 1000f
-            seed = (seed * 1103515245 + 12345) and 0x7FFFFFFF
-            rgb.g[i] = (seed % 1000) / 1000f
-            seed = (seed * 1103515245 + 12345) and 0x7FFFFFFF
-            rgb.b[i] = (seed % 1000) / 1000f
-        }
-        return rgb
-    }
-
     private fun testLuminance(r: Float, g: Float, b: Float): Float =
         0.2126f * r + 0.7152f * g + 0.0722f * b
 
@@ -181,7 +166,7 @@ class ToneAndFilterTest {
 
     @Test
     fun `highlight roll off with zero compression is identity`() {
-        val rgb = randomImage(8)
+        val rgb = TestImages.randomImage(8)
         val before = Triple(rgb.r.copyOf(), rgb.g.copyOf(), rgb.b.copyOf())
         HighlightRollOff.apply(rgb, 0.75f, 0f)
         for (i in rgb.r.indices) {
@@ -193,7 +178,7 @@ class ToneAndFilterTest {
 
     @Test
     fun `filters are exact identity at zero strength`() {
-        val rgb = randomImage(16)
+        val rgb = TestImages.randomImage(16)
         val before = rgb.r.copyOf()
         NoiseReducer.reduce(rgb, 0f, 0f)
         for (i in rgb.r.indices) assertEquals(before[i], rgb.r[i], 0f)
@@ -474,7 +459,7 @@ class ToneAndFilterTest {
 
     @Test
     fun `denoise keeps output inside input range`() {
-        val rgb = randomImage(32)
+        val rgb = TestImages.randomImage(32)
         val out = NoiseReducer.reduce(rgb, 1f, 1f)
         for (i in rgb.r.indices) {
             for (v in floatArrayOf(out.r[i], out.g[i], out.b[i])) {
@@ -485,7 +470,7 @@ class ToneAndFilterTest {
 
     @Test
     fun `sharpener amount is clamped and output stays finite`() {
-        val rgb = randomImage(16)
+        val rgb = TestImages.randomImage(16)
         val out = Sharpener.sharpen(rgb, 5f, 1f) // hostile input, clamped to MAX_AMOUNT
         for (i in rgb.r.indices) {
             assertTrue(out.r[i].isFinite() && out.g[i].isFinite() && out.b[i].isFinite())
@@ -514,7 +499,7 @@ class ToneAndFilterTest {
 
     @Test
     fun `output transformer never emits nan pixels`() {
-        val rgb = randomImage(8)
+        val rgb = TestImages.randomImage(8)
         rgb.r[0] = Float.NaN
         rgb.g[3] = Float.POSITIVE_INFINITY
         val argb = OutputTransformer.toArgb8888(rgb)

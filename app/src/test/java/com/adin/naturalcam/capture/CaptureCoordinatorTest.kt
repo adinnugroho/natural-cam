@@ -30,12 +30,14 @@ import com.adin.naturalcam.image.core.CfaLayout
 import com.adin.naturalcam.image.core.EncodedImage
 import com.adin.naturalcam.image.core.ImagePipeline
 import com.adin.naturalcam.image.core.ProcessingConfiguration
+import com.adin.naturalcam.image.core.ProcessingTimings
 import com.adin.naturalcam.image.core.RawImage
 import com.adin.naturalcam.image.core.YuvImage
 import com.adin.naturalcam.image.raw.TestDngFactory
 import com.adin.naturalcam.storage.MediaStoreWriter
 import android.net.Uri
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -63,8 +65,12 @@ class CaptureCoordinatorTest {
         override val state: StateFlow<CameraState> = MutableStateFlow(CameraState.Ready(caps.keys.first()))
         override val capabilities: Map<CameraId, CameraCapabilities> = caps
         override val lenses: List<LensOption> = emptyList()
+        override val zoomRatio: Float = 1f
 
         var frames: CapturedFrames? = null
+
+        /** Per-capture payload, for tests that run two captures at once. */
+        val framesById = mutableMapOf<CaptureId, CapturedFrames>()
         var error: Exception? = null
         var gate: CompletableDeferred<Unit>? = null
         var captureCount = 0
@@ -83,7 +89,7 @@ class CaptureCoordinatorTest {
             gate?.await()
             captureCount++
             error?.let { throw it }
-            return frames ?: yuvFrames(request.captureId)
+            return framesById[request.captureId] ?: frames ?: yuvFrames(request.captureId)
         }
 
         override suspend fun close() {}
@@ -95,13 +101,23 @@ class CaptureCoordinatorTest {
         var processedRaw = 0
         var processedYuv = 0
 
-        override fun processRaw(raw: RawImage, config: ProcessingConfiguration): EncodedImage {
+        override fun processRaw(
+            raw: RawImage,
+            config: ProcessingConfiguration,
+            timings: ProcessingTimings?,
+        ): EncodedImage {
             failWith?.let { throw it }
             processedRaw++
+            timings?.record("demosaic", 1)
             return EncodedImage(ByteArray(4) { 1 }, raw.width, raw.height)
         }
 
-        override fun processYuv(yuv: YuvImage, config: ProcessingConfiguration, orientationDegrees: Int): EncodedImage {
+        override fun processYuv(
+            yuv: YuvImage,
+            config: ProcessingConfiguration,
+            orientationDegrees: Int,
+            timings: ProcessingTimings?,
+        ): EncodedImage {
             failWith?.let { throw it }
             processedYuv++
             return EncodedImage(ByteArray(4) { 2 }, yuv.width, yuv.height)
@@ -113,18 +129,23 @@ class CaptureCoordinatorTest {
         val savedDngs = mutableListOf<String>()
         var fail = false
 
+        /** Suspends the first save so a test can hold the develop gate open. */
+        var saveGate: CompletableDeferred<Unit>? = null
+
         override suspend fun saveJpeg(
             bytes: ByteArray,
             fileName: String,
             metadata: CaptureMetadata,
             locationTagging: Boolean,
         ): SavedPhoto? {
+            saveGate?.await()
             if (fail) return null
             savedJpegs += fileName
             return SavedPhoto("content://test/$fileName", fileName, 4, 4, "image/jpeg")
         }
 
         override suspend fun saveDng(bytes: ByteArray, fileName: String, metadata: CaptureMetadata): SavedPhoto? {
+            saveGate?.await()
             if (fail) return null
             savedDngs += fileName
             return SavedPhoto("content://test/$fileName", fileName, 4, 4, "image/x-adobe-dng")
@@ -193,14 +214,19 @@ class CaptureCoordinatorTest {
         exposureCompensationStepEv = 1f / 3f,
         minimumFocusDistanceDiopters = 10f,
         focalLengthsMm = listOf(5.4f),
+        zoomRatioRange = 1f..10f,
         flashAvailable = true,
         opticalStabilizationSupported = false,
         sensorOrientation = 90,
     )
 
-    private fun request(rawMode: RawMode = RawMode.FINAL_ONLY, profile: ProcessingProfile = ProcessingProfile.NATURAL) =
+    private fun request(
+        rawMode: RawMode = RawMode.FINAL_ONLY,
+        profile: ProcessingProfile = ProcessingProfile.NATURAL,
+        captureId: String = "test-capture",
+    ) =
         PhotoCaptureRequest(
-            captureId = CaptureId("test-capture"),
+            captureId = CaptureId(captureId),
             cameraId = CameraId("0"),
             profile = profile,
             rawMode = rawMode,
@@ -217,7 +243,7 @@ class CaptureCoordinatorTest {
         val controller = FakeController(mapOf(CameraId("0") to capabilities(raw = false)))
         val pipeline = FakePipeline()
         val store = FakeMediaStore()
-        val coordinator = CaptureCoordinator(controller, pipeline, store, ioDispatcher = UnconfinedTestDispatcher(testScheduler))
+        val coordinator = CaptureCoordinator(controller, pipeline, store, processingDispatcher = UnconfinedTestDispatcher(testScheduler))
 
         val result = coordinator.capture(request())
         assertNotNull(result)
@@ -233,7 +259,7 @@ class CaptureCoordinatorTest {
         val controller = FakeController(mapOf(CameraId("0") to capabilities(raw = false)))
         val pipeline = FakePipeline()
         val store = FakeMediaStore()
-        val coordinator = CaptureCoordinator(controller, pipeline, store, ioDispatcher = UnconfinedTestDispatcher(testScheduler))
+        val coordinator = CaptureCoordinator(controller, pipeline, store, processingDispatcher = UnconfinedTestDispatcher(testScheduler))
 
         controller.error = CameraException(CameraError.CaptureFailed("boom"))
         assertNull(coordinator.capture(request()))
@@ -250,7 +276,7 @@ class CaptureCoordinatorTest {
         val controller = FakeController(mapOf(CameraId("0") to capabilities(raw = false)))
         val pipeline = FakePipeline()
         val store = FakeMediaStore()
-        val coordinator = CaptureCoordinator(controller, pipeline, store, ioDispatcher = UnconfinedTestDispatcher(testScheduler), maxConcurrentJobs = 1)
+        val coordinator = CaptureCoordinator(controller, pipeline, store, processingDispatcher = UnconfinedTestDispatcher(testScheduler), maxConcurrentJobs = 1)
 
         controller.gate = CompletableDeferred()
         val first = launch { coordinator.capture(request()) }
@@ -267,11 +293,38 @@ class CaptureCoordinatorTest {
     }
 
     @Test
+    fun `shutter accepts a second capture while the first is in flight`() = runTest {
+        val controller = FakeController(mapOf(CameraId("0") to capabilities(raw = false)))
+        val pipeline = FakePipeline()
+        val store = FakeMediaStore()
+        // Default bound: one developing plus one accepted.
+        val coordinator = CaptureCoordinator(controller, pipeline, store, processingDispatcher = UnconfinedTestDispatcher(testScheduler))
+
+        controller.gate = CompletableDeferred()
+        val first = launch { coordinator.capture(request()) }
+        testScheduler.runCurrent()
+        assertEquals(1, coordinator.jobsInFlight.value)
+
+        // A point-and-shoot camera must not lock the shutter for the seconds a develop takes:
+        // the second job is accepted while the first is still in flight (AGENTS 42 bounds it).
+        val second = launch { coordinator.capture(request()) }
+        testScheduler.runCurrent()
+        assertEquals(2, coordinator.jobsInFlight.value)
+
+        controller.gate?.complete(Unit)
+        first.join()
+        second.join()
+        assertEquals("both accepted captures reached the camera", 2, controller.captureCount)
+        assertEquals("every accepted job releases its slot", 0, coordinator.jobsInFlight.value)
+        assertEquals("both frames were developed and saved", 2, store.savedJpegs.size)
+    }
+
+    @Test
     fun `raw only saves raw without decoding pixels`() = runTest {
         val controller = FakeController(mapOf(CameraId("0") to capabilities(raw = true)))
         val pipeline = FakePipeline()
         val store = FakeMediaStore()
-        val coordinator = CaptureCoordinator(controller, pipeline, store, ioDispatcher = UnconfinedTestDispatcher(testScheduler))
+        val coordinator = CaptureCoordinator(controller, pipeline, store, processingDispatcher = UnconfinedTestDispatcher(testScheduler))
 
         // Deliberately not a real DNG: RAW_ONLY must never decode it.
         val junkDng = File.createTempFile("junk", ".dng").apply { writeBytes(ByteArray(8)) }
@@ -291,7 +344,7 @@ class CaptureCoordinatorTest {
         val controller = FakeController(mapOf(CameraId("0") to capabilities(raw = true)))
         val pipeline = FakePipeline()
         val store = FakeMediaStore()
-        val coordinator = CaptureCoordinator(controller, pipeline, store, ioDispatcher = UnconfinedTestDispatcher(testScheduler))
+        val coordinator = CaptureCoordinator(controller, pipeline, store, processingDispatcher = UnconfinedTestDispatcher(testScheduler))
 
         val dng = TestDngFactory.buildDng(CfaLayout.RGGB)
         controller.frames = rawFrames(CaptureId("test-capture"), dng)
@@ -309,7 +362,7 @@ class CaptureCoordinatorTest {
         val controller = FakeController(mapOf(CameraId("0") to capabilities(raw = true)))
         val pipeline = FakePipeline()
         val store = FakeMediaStore()
-        val coordinator = CaptureCoordinator(controller, pipeline, store, ioDispatcher = UnconfinedTestDispatcher(testScheduler))
+        val coordinator = CaptureCoordinator(controller, pipeline, store, processingDispatcher = UnconfinedTestDispatcher(testScheduler))
 
         val dng = TestDngFactory.buildDng(CfaLayout.RGGB)
         controller.frames = rawFrames(CaptureId("test-capture"), dng).let {
@@ -328,7 +381,7 @@ class CaptureCoordinatorTest {
         val controller = FakeController(mapOf(CameraId("0") to capabilities(raw = true)))
         val pipeline = FakePipeline()
         val store = FakeMediaStore()
-        val coordinator = CaptureCoordinator(controller, pipeline, store, ioDispatcher = UnconfinedTestDispatcher(testScheduler))
+        val coordinator = CaptureCoordinator(controller, pipeline, store, processingDispatcher = UnconfinedTestDispatcher(testScheduler))
 
         val dng = TestDngFactory.buildDng(CfaLayout.RGGB)
         controller.frames = rawFrames(CaptureId("test-capture"), dng)
@@ -338,5 +391,43 @@ class CaptureCoordinatorTest {
         assertEquals(1, pipeline.processedRaw)
         assertEquals(1, store.savedJpegs.size)
         assertEquals("temp DNG is not kept in FINAL_ONLY mode", 0, store.savedDngs.size)
+    }
+
+    @Test
+    fun `cancelling a capture queued behind the develop gate cleans its temp raw`() = runTest {
+        val controller = FakeController(mapOf(CameraId("0") to capabilities(raw = true)))
+        val pipeline = FakePipeline()
+        val store = FakeMediaStore()
+        val coordinator = CaptureCoordinator(controller, pipeline, store, processingDispatcher = UnconfinedTestDispatcher(testScheduler))
+
+        val firstDng = TestDngFactory.buildDng(CfaLayout.RGGB)
+        val secondDng = TestDngFactory.buildDng(CfaLayout.RGGB)
+        controller.framesById[CaptureId("first")] = rawFrames(CaptureId("first"), firstDng)
+        controller.framesById[CaptureId("second")] = rawFrames(CaptureId("second"), secondDng)
+
+        // The first develop holds the gate while it is inside its RAW save.
+        store.saveGate = CompletableDeferred()
+        val first = launch { coordinator.capture(request(RawMode.RAW_AND_FINAL, captureId = "first")) }
+        testScheduler.runCurrent()
+        val second = launch { coordinator.capture(request(RawMode.RAW_AND_FINAL, captureId = "second")) }
+        testScheduler.runCurrent()
+        assertEquals("both captures were accepted", 2, coordinator.jobsInFlight.value)
+        assertEquals("only the first develop reached storage", 0, store.savedDngs.size)
+
+        // Cancel while it waits for the gate: that path never enters processRawCapture, so
+        // the temp RAW must be cleaned here, and a cancelled job is not a failed capture.
+        second.cancelAndJoin()
+
+        assertTrue(
+            "cancellation must not surface as a capture failure",
+            coordinator.captureState.value !is CaptureState.Failed,
+        )
+        assertFalse("queued capture must clean its temp RAW (AGENTS 51)", secondDng.exists())
+        assertEquals("the cancelled job released its slot", 1, coordinator.jobsInFlight.value)
+
+        store.saveGate?.complete(Unit)
+        first.join()
+        assertFalse("a completed develop cleans its temp RAW too", firstDng.exists())
+        assertEquals(0, coordinator.jobsInFlight.value)
     }
 }

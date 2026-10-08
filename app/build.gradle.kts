@@ -33,10 +33,6 @@ android {
         buildConfig = true
     }
 
-    packaging {
-        resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
-    }
-
     testOptions {
         // android.util.Log is used for SPEC 109 capture logging; unit tests get defaults.
         unitTests.isReturnDefaultValues = true
@@ -53,13 +49,11 @@ dependencies {
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
     implementation("androidx.navigation:navigation-compose:2.9.8")
 
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
 
     implementation("androidx.camera:camera-core:1.6.2")

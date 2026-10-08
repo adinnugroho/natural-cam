@@ -6,6 +6,7 @@ import android.graphics.ImageFormat
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
+import com.adin.naturalcam.camera.camerax.IspOptionMapping
 import com.adin.naturalcam.domain.CameraCapabilities
 import com.adin.naturalcam.domain.CameraId
 import com.adin.naturalcam.domain.CapabilityConfidence
@@ -22,6 +23,10 @@ import com.adin.naturalcam.domain.NoiseReductionMode
  * Everything is SUPPORTED (advertised) or UNAVAILABLE/UNKNOWN at scan time;
  * CONFIRMED is only recorded after verified device behavior (SPEC 12).
  */
+@androidx.annotation.OptIn(
+    androidx.camera.camera2.interop.ExperimentalCamera2Interop::class,
+    androidx.camera.core.ExperimentalLensFacing::class,
+)
 object CameraCapabilityScanner {
 
     fun scan(cameraInfo: CameraInfo): CameraCapabilities {
@@ -82,6 +87,7 @@ object CameraCapabilityScanner {
             exposureCompensationStepEv = evStep(chars),
             minimumFocusDistanceDiopters = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)?.takeIf { it > 0f },
             focalLengthsMm = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.toList() ?: emptyList(),
+            zoomRatioRange = zoomRatioRange(chars),
             flashAvailable = chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true,
             opticalStabilizationSupported = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)
                 ?.contains(CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON) == true,
@@ -102,6 +108,13 @@ object CameraCapabilityScanner {
     private fun evStep(chars: Camera2CameraInfo): Float =
         chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: 1f / 3f
 
+    /** `android.control.zoomRatioRange`; null below API 30, which has no such key. */
+    private fun zoomRatioRange(chars: Camera2CameraInfo): ClosedFloatingPointRange<Float>? {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return null
+        val range = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) ?: return null
+        return range.lower..range.upper
+    }
+
     private fun Camera2CameraInfo.hardwareLevel(): HardwareLevel =
         when (get(CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)) {
             CameraMetadata.INFO_SUPPORTED_HARDWARE_LEVEL_LEGACY -> HardwareLevel.LEGACY
@@ -114,28 +127,11 @@ object CameraCapabilityScanner {
 
     private fun Camera2CameraInfo.noiseReductionModes(): Set<NoiseReductionMode> =
         (get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES) ?: intArrayOf())
-            .mapTo(mutableSetOf()) {
-                when (it) {
-                    CameraMetadata.NOISE_REDUCTION_MODE_OFF -> NoiseReductionMode.OFF
-                    CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL -> NoiseReductionMode.MINIMAL
-                    CameraMetadata.NOISE_REDUCTION_MODE_FAST -> NoiseReductionMode.FAST
-                    CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY -> NoiseReductionMode.HIGH_QUALITY
-                    CameraMetadata.NOISE_REDUCTION_MODE_ZERO_SHUTTER_LAG -> NoiseReductionMode.ZERO_SHUTTER_LAG
-                    else -> NoiseReductionMode.UNKNOWN
-                }
-            }
+            .mapTo(mutableSetOf(), IspOptionMapping::noiseReductionFromCamera2)
 
     private fun Camera2CameraInfo.edgeModes(): Set<EdgeMode> =
         (get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES) ?: intArrayOf())
-            .mapTo(mutableSetOf()) {
-                when (it) {
-                    CameraMetadata.EDGE_MODE_OFF -> EdgeMode.OFF
-                    CameraMetadata.EDGE_MODE_FAST -> EdgeMode.FAST
-                    CameraMetadata.EDGE_MODE_HIGH_QUALITY -> EdgeMode.HIGH_QUALITY
-                    CameraMetadata.EDGE_MODE_ZERO_SHUTTER_LAG -> EdgeMode.ZERO_SHUTTER_LAG
-                    else -> EdgeMode.UNKNOWN
-                }
-            }
+            .mapTo(mutableSetOf(), IspOptionMapping::edgeFromCamera2)
 
     private fun Int.toDomain(): LensFacing = when (this) {
         CameraSelector.LENS_FACING_BACK -> LensFacing.BACK

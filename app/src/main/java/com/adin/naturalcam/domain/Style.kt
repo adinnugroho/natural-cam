@@ -12,11 +12,17 @@ data class StylePoint(val x: Float, val y: Float) {
 }
 
 /** v1 style interpretation version; bump when pad→parameter mapping changes (STYLE_PLAN 24). */
-enum class StyleVersion(val code: Int) { V1(1) }
+enum class StyleVersion(val code: Int) {
+    /** Original mapping: tone pads ran inverted and palette X collapsed chroma (see StyleEngine). */
+    V1(1),
+
+    /** Tone pads act in their documented direction and palette X boosts rather than greys out. */
+    V2(2),
+}
 
 /** Complete creative style state applied between NATURAL base tone and gamut mapping (STYLE_PLAN 15). */
 data class StyleState(
-    val version: Int = StyleVersion.V1.code,
+    val version: Int = StyleVersion.V2.code,
     val tone: StylePoint = StylePoint.NEUTRAL,
     val color: StylePoint = StylePoint.NEUTRAL,
     val palette: StylePoint = StylePoint.NEUTRAL,
@@ -73,6 +79,29 @@ object StylePresets {
         preset("muted", "Muted", StylePoint.NEUTRAL, StylePoint(0f, -0.6f), StylePoint.NEUTRAL),
         preset("rich", "Rich", StylePoint(0.3f, 0f), StylePoint(0.2f, 0.7f), StylePoint.NEUTRAL),
         preset("deep", "Deep", StylePoint(0.4f, -0.6f), StylePoint.NEUTRAL, StylePoint.NEUTRAL),
+        /*
+         * Warm Street (FILM_STYLE.md): a restrained warm filmic street look — firm
+         * black point with shadow texture intact, denser warm-neutral midtones, soft
+         * highlights, restrained blues, organic olive-leaning greens, believable skin.
+         *
+         * Pads are the reference effect fractions run back through [StyleEngine.shape],
+         * so `x` is the intended strength of that axis, not a raw pad position:
+         *   tone    +0.30 / -0.50  firmer contrast, deeper midtones
+         *   color   +0.40 / -0.35  warmer, slightly muted
+         *   palette -0.25 / +0.45  green lean, gold undertone
+         * Contrast is deliberately below the reference's suggestion: at the equivalent
+         * pad (0.39) a firm curve around the 0.18 linear pivot clips everything below
+         * display 0.09 to black, which the reference forbids. Measured on the synthetic
+         * scene set: deep shadow -6%, midtones -1%, highlights -1%, blue chroma -5%,
+         * green hue 117° -> 116°, skin chroma -4% at unchanged hue direction.
+         */
+        preset(
+            "warm_street",
+            "Warm Street",
+            StylePoint(0.30f, -0.50f),
+            StylePoint(0.40f, -0.35f),
+            StylePoint(-0.25f, 0.45f),
+        ),
     )
 }
 

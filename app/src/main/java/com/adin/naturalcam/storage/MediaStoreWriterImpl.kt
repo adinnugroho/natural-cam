@@ -32,11 +32,11 @@ class MediaStoreWriterImpl(
     ): SavedPhoto? = withContext(ioDispatcher) {
         var uri: Uri? = null
         try {
-            uri = insert(fileName, JPEG_MIME, metadata.timestampMs) ?: return@withContext null
-            val exifBytes = ExifMetadataWriter.apply(bytes, metadata, locationTagging)
-            write(uri, exifBytes)
+            uri = insert(fileName, StoragePaths.JPEG_MIME, metadata.timestampMs) ?: return@withContext null
+            val exif = ExifMetadataWriter.apply(bytes, metadata, locationTagging)
+            write(uri, exif.bytes)
             clearPending(uri)
-            savedPhoto(uri, fileName, JPEG_MIME, exifBytes)
+            savedPhoto(uri, fileName, StoragePaths.JPEG_MIME, exif.width, exif.height)
         } catch (e: Exception) {
             uri?.let { delete(it) }
             if (e is CancellationException) throw e
@@ -55,10 +55,17 @@ class MediaStoreWriterImpl(
         // capture; nothing is added here (AGENTS 52).
         var uri: Uri? = null
         try {
-            uri = insert(fileName, DNG_MIME, metadata.timestampMs) ?: return@withContext null
+            uri = insert(fileName, StoragePaths.DNG_MIME, metadata.timestampMs) ?: return@withContext null
             write(uri, bytes)
             clearPending(uri)
-            savedPhoto(uri, fileName, DNG_MIME, bytes)
+            val exif = ExifInterface(ByteArrayInputStream(bytes))
+            savedPhoto(
+                uri,
+                fileName,
+                StoragePaths.DNG_MIME,
+                exif.getAttributeInt(ExifInterface.TAG_IMAGE_WIDTH, 0),
+                exif.getAttributeInt(ExifInterface.TAG_IMAGE_LENGTH, 0),
+            )
         } catch (e: Exception) {
             uri?.let { delete(it) }
             if (e is CancellationException) throw e
@@ -81,7 +88,7 @@ class MediaStoreWriterImpl(
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
             put(MediaStore.MediaColumns.MIME_TYPE, mime)
-            put(MediaStore.MediaColumns.RELATIVE_PATH, RELATIVE_PATH)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, StoragePaths.RELATIVE_PATH)
             put(MediaStore.MediaColumns.IS_PENDING, 1)
             put(MediaStore.Images.ImageColumns.DATE_TAKEN, timestampMs)
         }
@@ -99,22 +106,11 @@ class MediaStoreWriterImpl(
         context.contentResolver.update(uri, values, null, null)
     }
 
-    /** Width/height from cheap EXIF tags when present, else 0/0 — no pixel decoding on the save path. */
-    private fun savedPhoto(uri: Uri, fileName: String, mime: String, bytes: ByteArray): SavedPhoto {
-        val exif = ExifInterface(ByteArrayInputStream(bytes))
-        return SavedPhoto(
-            uri = uri.toString(),
-            fileName = fileName,
-            width = exif.getAttributeInt(ExifInterface.TAG_IMAGE_WIDTH, 0),
-            height = exif.getAttributeInt(ExifInterface.TAG_IMAGE_LENGTH, 0),
-            mimeType = mime,
-        )
-    }
+    /** Width/height already read from EXIF; no second parse and no pixel decoding on the save path. */
+    private fun savedPhoto(uri: Uri, fileName: String, mime: String, width: Int, height: Int): SavedPhoto =
+        SavedPhoto(uri = uri.toString(), fileName = fileName, width = width, height = height, mimeType = mime)
 
     private companion object {
         const val TAG = "MediaStoreWriter"
-        const val RELATIVE_PATH = "Pictures/NaturalCamera"
-        const val JPEG_MIME = "image/jpeg"
-        const val DNG_MIME = "image/x-adobe-dng"
     }
 }

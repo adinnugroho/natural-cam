@@ -24,15 +24,24 @@ object CapturePathResolver {
         capabilities: CameraCapabilities,
         profile: ProcessingProfile,
         rawMode: RawMode,
+        zoomRatio: Float = 1f,
     ): CapturePlan {
         val saveRaw = rawMode != RawMode.FINAL_ONLY
-        val raw = capabilities.rawUsable
+        // Below 1x the logical camera engages a *wider* physical camera. RAW is not exposed
+        // for those (SPEC 96 states the case), so a RAW plan would quietly deliver the main
+        // sensor's frame — narrower than what the viewfinder shows. The YUV stream carries the
+        // same crop region, so it keeps the composed framing *and* stays under our pipeline.
+        val wideFraming = zoomRatio < 1f
+        // RAW_ONLY keeps the RAW plan: the user asked for the RAW *file*, which exists only for
+        // the main camera, and the DNG's own framing is already recorded as PREVIEW_MAY_DIFFER.
+        val raw = capabilities.rawUsable && (!wideFraming || rawMode == RawMode.RAW_ONLY)
         val yuv = capabilities.yuvUsable
         val jpeg = capabilities.jpegUsable
 
         // Least-aggressive ISP request the hardware reports (SPEC 23). Honesty
         // about what actually got disabled is recorded as limitations below.
-        val isp = resolveIspConfiguration(capabilities, profile)
+        // SYSTEM does not use it: the backend leaves the device's own defaults alone.
+        val isp = resolveIspConfiguration(capabilities)
 
         val plan = when (profile) {
             ProcessingProfile.SYSTEM -> resolveSystem(raw, yuv, jpeg, saveRaw, isp)
@@ -41,11 +50,15 @@ object CapturePathResolver {
         }
 
         // RAW-only mode must never synthesize a final image from an unwanted path.
-        return if (rawMode == RawMode.RAW_ONLY && plan.source == CaptureSource.RAW_SENSOR) {
-            plan.copy(saveRaw = true)
-        } else {
-            plan
+        val resolved = when {
+            rawMode == RawMode.RAW_ONLY && plan.source == CaptureSource.RAW_SENSOR -> plan.copy(saveRaw = true)
+            // A framing wider than 1x cannot come from RAW even though this camera has it:
+            // say so instead of delivering the narrower main-sensor frame unexplained.
+            wideFraming && rawMode != RawMode.RAW_ONLY && capabilities.rawUsable ->
+                plan.copy(limitations = plan.limitations + CaptureLimitation.RAW_NOT_AVAILABLE)
+            else -> plan
         }
+        return resolved
     }
 
     private fun resolveSystem(
@@ -155,9 +168,7 @@ object CapturePathResolver {
 
     private fun resolveIspConfiguration(
         capabilities: CameraCapabilities,
-        profile: ProcessingProfile,
     ): IspConfiguration {
-        val needsLeastProcessing = profile == ProcessingProfile.PURE
         val nrModes = capabilities.noiseReductionModes
         val edgeModes = capabilities.edgeModes
 
@@ -173,7 +184,6 @@ object CapturePathResolver {
         return IspConfiguration(
             noiseReduction = nr,
             edgeMode = edge,
-            hdrDisabled = true, // requested via CONTROL_ENABLE_ZSL/HDR off where controllable; confirmed only on device
         )
     }
 

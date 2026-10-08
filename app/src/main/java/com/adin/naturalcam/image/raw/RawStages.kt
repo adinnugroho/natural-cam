@@ -7,6 +7,7 @@ import com.adin.naturalcam.image.core.LensShadingMap
 import com.adin.naturalcam.image.core.RawImage
 import com.adin.naturalcam.image.core.RgbGains
 import com.adin.naturalcam.image.core.RgbImage
+import com.adin.naturalcam.image.core.bilinearGridGain
 /**
  * Black-level subtraction and white-level normalization to [0, 1] floats
  * (AGENTS 20 — no early 8-bit). Values above 1.0 are preserved (overexposed
@@ -84,14 +85,8 @@ object LensShadingCorrector {
                 val baseHigh = rowHigh * columns
                 for (x in 0 until width) {
                     val grid = map.grids[(y and 1) * 2 + (x and 1)] ?: continue
-                    val low = columnLow[x]
-                    val high = columnHigh[x]
-                    val fracX = columnFrac[x]
-                    val topLeft = grid[baseLow + low]
-                    val top = topLeft + (grid[baseLow + high] - topLeft) * fracX
-                    val bottomLeft = grid[baseHigh + low]
-                    val bottom = bottomLeft + (grid[baseHigh + high] - bottomLeft) * fracX
-                    values[y * width + x] *= top + (bottom - top) * fracY
+                    values[y * width + x] *=
+                        bilinearGridGain(grid, baseLow, baseHigh, columnLow[x], columnHigh[x], columnFrac[x], fracY)
                 }
             }
         }
@@ -108,36 +103,52 @@ object LensShadingCorrector {
  */
 object Demosaicer {
 
+    /**
+     * Per-pixel neighbour averages, written without the per-sample lambda, boxed
+     * `Float?` returns, and `Sum` allocation the first version used: at 12 MP
+     * that was tens of millions of short-lived objects on the dev machine's
+     * hottest stage. The CFA phase table replaces `CfaLayout.channelAt` inside
+     * the probes — the same answer for `(x and 1, y and 1)`, without an enum
+     * branch per neighbour. Sample math is unchanged and unit-verified bit-exact
+     * against the previous implementation.
+     *
+     * Missing-sample sentinel is [Float.NaN]: normalized RAW values are finite by
+     * construction ([RawNormalizer] divides finite integers), so a NaN can only
+     * come from the sentinel itself.
+     */
     fun demosaic(bayer: BayerImage): RgbImage {
         val out = RgbImage(bayer.width, bayer.height)
         val cfa = bayer.cfa
         val v = bayer.values
-        fun sample(x: Int, y: Int): Float {
-            val cx = x.coerceIn(0, bayer.width - 1)
-            val cy = y.coerceIn(0, bayer.height - 1)
-            return v[cy * bayer.width + cx]
-        }
+        val w = bayer.width
+        val h = bayer.height
+        // CFA channel of each 2x2 phase, indexed by (y and 1) * 2 + (x and 1).
+        val phase = IntArray(4) { cfa.channelAt(it and 1, it shr 1) }
 
-        CpuParallel.forEach(bayer.height, minItemsPerTask = 128) { startRow, endRow ->
+        CpuParallel.forEach(h, minItemsPerTask = 128) { startRow, endRow ->
+            // One-element readout for diagonal sums, reused for every pixel of this task.
+            val diagonal = FloatArray(1)
             for (y in startRow until endRow) {
-                for (x in 0 until bayer.width) {
-                    val i = y * bayer.width + x
-                    val own = cfa.channelAt(x, y)
+                val base = y * w
+                val phaseRow = (y and 1) * 2
+                for (x in 0 until w) {
+                    val i = base + x
+                    val own = phase[phaseRow + (x and 1)]
                     val r: Float
                     val g: Float
                     val b: Float
                     if (own == 0) {
                         r = v[i]
-                        g = cross(bayer, x, y, 1, ::sample)
-                        b = diag(bayer, x, y, 2, ::sample)
+                        g = cross(v, w, h, phase, x, y, 1)
+                        b = diag(v, w, h, phase, x, y, 2, diagonal)
                     } else if (own == 2) {
                         b = v[i]
-                        g = cross(bayer, x, y, 1, ::sample)
-                        r = diag(bayer, x, y, 0, ::sample)
+                        g = cross(v, w, h, phase, x, y, 1)
+                        r = diag(v, w, h, phase, x, y, 0, diagonal)
                     } else {
                         g = v[i]
-                        r = chromaAtGreen(bayer, x, y, 0, ::sample)
-                        b = chromaAtGreen(bayer, x, y, 2, ::sample)
+                        r = chromaAtGreen(v, w, h, phase, x, y, 0, diagonal)
+                        b = chromaAtGreen(v, w, h, phase, x, y, 2, diagonal)
                     }
                     out.r[i] = r
                     out.g[i] = g
@@ -148,80 +159,85 @@ object Demosaicer {
         return out
     }
 
-    private fun cross(bayer: BayerImage, x: Int, y: Int, channel: Int, sample: (Int, Int) -> Float): Float {
+    /** Accumulation order is part of the result: vertical sums are not associative in float. */
+    private fun cross(v: FloatArray, w: Int, h: Int, phase: IntArray, x: Int, y: Int, channel: Int): Float {
+        val i = y * w + x
         var sum = 0f
         var n = 0
-        if (x > 0 && bayer.cfa.channelAt(x - 1, y) == channel) { sum += sample(x - 1, y); n++ }
-        if (x < bayer.width - 1 && bayer.cfa.channelAt(x + 1, y) == channel) { sum += sample(x + 1, y); n++ }
-        if (y > 0 && bayer.cfa.channelAt(x, y - 1) == channel) { sum += sample(x, y - 1); n++ }
-        if (y < bayer.height - 1 && bayer.cfa.channelAt(x, y + 1) == channel) { sum += sample(x, y + 1); n++ }
-        return if (n == 0) fallback(bayer, x, y, channel, sample) else sum / n
+        if (x > 0 && phase[(y and 1) * 2 + ((x - 1) and 1)] == channel) { sum += v[i - 1]; n++ }
+        if (x < w - 1 && phase[(y and 1) * 2 + ((x + 1) and 1)] == channel) { sum += v[i + 1]; n++ }
+        if (y > 0 && phase[((y - 1) and 1) * 2 + (x and 1)] == channel) { sum += v[i - w]; n++ }
+        if (y < h - 1 && phase[((y + 1) and 1) * 2 + (x and 1)] == channel) { sum += v[i + w]; n++ }
+        return if (n == 0) fallback(v, w, h, phase, x, y, channel) else sum / n
     }
 
-    private fun diag(bayer: BayerImage, x: Int, y: Int, channel: Int, sample: (Int, Int) -> Float): Float {
-        val sum = diagSum(bayer, x, y, channel, sample)
-        return if (sum.count == 0) fallback(bayer, x, y, channel, sample) else sum.total / sum.count
+    private fun diag(v: FloatArray, w: Int, h: Int, phase: IntArray, x: Int, y: Int, channel: Int, sumOut: FloatArray): Float {
+        val count = diagSum(v, w, h, phase, x, y, channel, sumOut)
+        return if (count == 0) fallback(v, w, h, phase, x, y, channel) else sumOut[0] / count
     }
 
-    private fun diagSum(bayer: BayerImage, x: Int, y: Int, channel: Int, sample: (Int, Int) -> Float): Sum {
+    /** [sumOut] is a per-task single-element readout: one allocation per worker, never per pixel. */
+    private fun diagSum(v: FloatArray, w: Int, h: Int, phase: IntArray, x: Int, y: Int, channel: Int, sumOut: FloatArray): Int {
+        val i = y * w + x
         var total = 0f
         var count = 0
-        if (x > 0 && y > 0 && bayer.cfa.channelAt(x - 1, y - 1) == channel) { total += sample(x - 1, y - 1); count++ }
-        if (x < bayer.width - 1 && y > 0 && bayer.cfa.channelAt(x + 1, y - 1) == channel) { total += sample(x + 1, y - 1); count++ }
-        if (x > 0 && y < bayer.height - 1 && bayer.cfa.channelAt(x - 1, y + 1) == channel) { total += sample(x - 1, y + 1); count++ }
-        if (x < bayer.width - 1 && y < bayer.height - 1 && bayer.cfa.channelAt(x + 1, y + 1) == channel) { total += sample(x + 1, y + 1); count++ }
-        return Sum(total, count)
+        if (x > 0 && y > 0 && phase[((y - 1) and 1) * 2 + ((x - 1) and 1)] == channel) { total += v[i - w - 1]; count++ }
+        if (x < w - 1 && y > 0 && phase[((y - 1) and 1) * 2 + ((x + 1) and 1)] == channel) { total += v[i - w + 1]; count++ }
+        if (x > 0 && y < h - 1 && phase[((y + 1) and 1) * 2 + ((x - 1) and 1)] == channel) { total += v[i + w - 1]; count++ }
+        if (x < w - 1 && y < h - 1 && phase[((y + 1) and 1) * 2 + ((x + 1) and 1)] == channel) { total += v[i + w + 1]; count++ }
+        sumOut[0] = total
+        return count
     }
 
-    private class Sum(val total: Float, val count: Int)
-
-    private fun chromaAtGreen(bayer: BayerImage, x: Int, y: Int, channel: Int, sample: (Int, Int) -> Float): Float {
+    private fun chromaAtGreen(v: FloatArray, w: Int, h: Int, phase: IntArray, x: Int, y: Int, channel: Int, sumOut: FloatArray): Float {
         var total = 0f
         var count = 0
-        horizontalNearest(bayer, x, y, channel, sample)?.let { total += it; count++ }
-        verticalNearest(bayer, x, y, channel, sample)?.let { total += it; count++ }
-        val diag = diagSum(bayer, x, y, channel, sample)
-        if (diag.count > 0) { total += diag.total / diag.count; count++ }
-        return if (count == 0) sample(x, y) else total / count
+        val horizontal = horizontalNearest(v, w, h, phase, x, y, channel)
+        if (!horizontal.isNaN()) { total += horizontal; count++ }
+        val vertical = verticalNearest(v, w, h, phase, x, y, channel)
+        if (!vertical.isNaN()) { total += vertical; count++ }
+        val diagonalCount = diagSum(v, w, h, phase, x, y, channel, sumOut)
+        if (diagonalCount > 0) { total += sumOut[0] / diagonalCount; count++ }
+        return if (count == 0) v[y * w + x] else total / count
     }
 
-    private fun horizontalNearest(bayer: BayerImage, x: Int, y: Int, channel: Int, sample: (Int, Int) -> Float): Float? {
-        val l = probe(bayer, x, y, channel, -1, 0, sample)
-        val r = probe(bayer, x, y, channel, 1, 0, sample)
+    private fun horizontalNearest(v: FloatArray, w: Int, h: Int, phase: IntArray, x: Int, y: Int, channel: Int): Float {
+        val l = probe(v, w, h, phase, x, y, channel, -1, 0)
+        val r = probe(v, w, h, phase, x, y, channel, 1, 0)
         return when {
-            l != null && r != null -> (l + r) / 2f
-            l != null -> l
+            !l.isNaN() && !r.isNaN() -> (l + r) / 2f
+            !l.isNaN() -> l
             else -> r
         }
     }
 
-    private fun verticalNearest(bayer: BayerImage, x: Int, y: Int, channel: Int, sample: (Int, Int) -> Float): Float? {
-        val u = probe(bayer, x, y, channel, 0, -1, sample)
-        val d = probe(bayer, x, y, channel, 0, 1, sample)
+    private fun verticalNearest(v: FloatArray, w: Int, h: Int, phase: IntArray, x: Int, y: Int, channel: Int): Float {
+        val u = probe(v, w, h, phase, x, y, channel, 0, -1)
+        val d = probe(v, w, h, phase, x, y, channel, 0, 1)
         return when {
-            u != null && d != null -> (u + d) / 2f
-            u != null -> u
+            !u.isNaN() && !d.isNaN() -> (u + d) / 2f
+            !u.isNaN() -> u
             else -> d
         }
     }
 
-    private fun probe(
-        bayer: BayerImage, x: Int, y: Int, channel: Int, dx: Int, dy: Int,
-        sample: (Int, Int) -> Float,
-    ): Float? {
+    private fun probe(v: FloatArray, w: Int, h: Int, phase: IntArray, x: Int, y: Int, channel: Int, dx: Int, dy: Int): Float {
         for (d in 1..2) {
             val cx = x + dx * d
             val cy = y + dy * d
-            if (cx !in 0 until bayer.width || cy !in 0 until bayer.height) return null
-            if (bayer.cfa.channelAt(cx, cy) == channel) return sample(cx, cy)
+            if (cx < 0 || cx >= w || cy < 0 || cy >= h) return Float.NaN
+            if (phase[(cy and 1) * 2 + (cx and 1)] == channel) return v[cy * w + cx]
         }
-        return null
+        return Float.NaN
     }
 
-    private fun fallback(bayer: BayerImage, x: Int, y: Int, channel: Int, sample: (Int, Int) -> Float): Float =
-        horizontalNearest(bayer, x, y, channel, sample)
-            ?: verticalNearest(bayer, x, y, channel, sample)
-            ?: sample(x, y)
+    private fun fallback(v: FloatArray, w: Int, h: Int, phase: IntArray, x: Int, y: Int, channel: Int): Float {
+        val horizontal = horizontalNearest(v, w, h, phase, x, y, channel)
+        if (!horizontal.isNaN()) return horizontal
+        val vertical = verticalNearest(v, w, h, phase, x, y, channel)
+        if (!vertical.isNaN()) return vertical
+        return v[y * w + x]
+    }
 }
 
 /**

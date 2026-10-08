@@ -16,6 +16,8 @@ import com.adin.naturalcam.camera.CameraCapabilityScanner
 import com.adin.naturalcam.camera.CameraController
 import com.adin.naturalcam.camera.CameraException
 import com.adin.naturalcam.camera.CapturedFrames
+import com.adin.naturalcam.camera.toCameraError
+import com.adin.naturalcam.domain.AspectRatio
 import com.adin.naturalcam.domain.CameraCapabilities
 import com.adin.naturalcam.domain.CameraError
 import com.adin.naturalcam.domain.CameraId
@@ -23,17 +25,17 @@ import com.adin.naturalcam.domain.CameraState
 import com.adin.naturalcam.domain.CaptureMetadata
 import com.adin.naturalcam.domain.CapturePlan
 import com.adin.naturalcam.domain.CaptureSource
-import com.adin.naturalcam.domain.EdgeMode
 import com.adin.naturalcam.domain.FlashMode
 import com.adin.naturalcam.domain.IspConfiguration
-import com.adin.naturalcam.domain.NoiseReductionMode
-import com.adin.naturalcam.domain.LensFacing
 import com.adin.naturalcam.domain.LensOption
 import com.adin.naturalcam.domain.NormalizedPoint
 import com.adin.naturalcam.domain.PhotoCaptureRequest
 import com.adin.naturalcam.domain.RawMode
 import com.adin.naturalcam.domain.ProcessingProfile
 import com.adin.naturalcam.image.core.YuvImage
+import com.adin.naturalcam.storage.FileNaming
+import com.adin.naturalcam.storage.StoragePaths
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -41,10 +43,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.IOException
-import java.util.UUID
 import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -59,7 +60,7 @@ import kotlin.coroutines.resumeWithException
 class CameraXController(
     private val context: Context,
     private val lifecycleOwner: androidx.lifecycle.LifecycleOwner,
-    private val capturesDir: File = File(context.cacheDir, "captures"),
+    private val capturesDir: File = StoragePaths.captureCacheDir(context),
 ) : CameraController {
 
     private val mainExecutor = androidx.core.content.ContextCompat.getMainExecutor(context)
@@ -75,24 +76,34 @@ class CameraXController(
 
     private var captureFormat: Int = ImageCapture.OUTPUT_FORMAT_JPEG
     private var analysisBound = false
+
+    /** True while the analysis stream is the capture source and must be bound at its largest size. */
+    private var analysisFullResolution = false
+    private var boundAnalysisFullResolution = false
     private var boundIsp: IspConfiguration? = null
     private var wantedIsp: IspConfiguration? = null
-    private var wantedAspect: com.adin.naturalcam.domain.AspectRatio = com.adin.naturalcam.domain.AspectRatio.RATIO_4_3
+    private var wantedAspect: AspectRatio = AspectRatio.RATIO_4_3
     private var wantedHighestResolution: Boolean = false
-    private var boundAspect: com.adin.naturalcam.domain.AspectRatio? = null
+    private var boundAspect: AspectRatio? = null
 
     private val _state = MutableStateFlow<CameraState>(CameraState.Uninitialized)
     override val state: StateFlow<CameraState> = _state.asStateFlow()
 
-    private val _capabilities = LinkedHashMap<CameraId, CameraCapabilities>()
-    override val capabilities: Map<CameraId, CameraCapabilities> get() = _capabilities.toMap()
+    // Published as immutable snapshots rebuilt by initialize(): the old getters copied
+    // the whole map/list on every read, and DeviceInfoScreen reads them per recomposition.
+    private var capabilitiesSnapshot: Map<CameraId, CameraCapabilities> = emptyMap()
+    override val capabilities: Map<CameraId, CameraCapabilities> get() = capabilitiesSnapshot
 
-    private val _lenses = mutableListOf<LensOption>()
-    override val lenses: List<LensOption> get() = _lenses.toList()
+    private var lensesSnapshot: List<LensOption> = emptyList()
+    override val lenses: List<LensOption> get() = lensesSnapshot
 
     private var selected: CameraId? = null
     private var requestedExposureEv: Float = 0f
+    /** Last zoom the user set; re-applied after a rebind resets the session crop. */
+    private var requestedZoom: Float = 1f
+    override val zoomRatio: Float get() = requestedZoom
 
+    @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
     override suspend fun initialize(): List<LensOption> {
         val provider = awaitProvider()
         this.provider = provider
@@ -101,11 +112,16 @@ class CameraXController(
             _state.value = CameraState.Error(CameraError.CameraUnavailable("no cameras reported"))
             throw CameraException(CameraError.CameraUnavailable("no cameras reported"))
         }
-        _capabilities.clear()
-        _lenses.clear()
-        infos.forEach { _capabilities[CameraId(Camera2CameraInfo.from(it).cameraId)] = CameraCapabilityScanner.scan(it) }
-        _lenses += buildLensOptions(infos)
-        return _lenses
+        // One scan per camera: every Camera2 characteristic is a blocking metadata read,
+        // and the lens list used to scan each camera a second time. Off the main thread
+        // because that read is what makes startup jank (AGENTS 43).
+        val scanned = withContext(Dispatchers.Default) {
+            infos.associateWith { CameraCapabilityScanner.scan(it) }
+        }
+        val lenses = buildLensOptions(scanned)
+        capabilitiesSnapshot = scanned.mapKeys { (info, _) -> CameraId(Camera2CameraInfo.from(info).cameraId) }
+        lensesSnapshot = lenses
+        return lenses
     }
 
     override fun attachPreview(previewView: PreviewView) {
@@ -115,6 +131,9 @@ class CameraXController(
     override suspend fun selectCamera(cameraId: CameraId) {
         bindMutex.withLock {
             val from = selected
+            // A different camera starts at 1x: the zoom the user set belongs to the lens they
+            // were composing with, not to the one they just switched to.
+            if (from != null && from != cameraId) requestedZoom = 1f
             _state.value = if (from != null && from != cameraId) {
                 CameraState.Switching(from, cameraId)
             } else {
@@ -148,7 +167,7 @@ class CameraXController(
         cam.cameraControl.setExposureCompensationIndex(index)
     }
 
-    override suspend fun setAspectRatio(aspectRatio: com.adin.naturalcam.domain.AspectRatio) {
+    override suspend fun setAspectRatio(aspectRatio: AspectRatio) {
         bindMutex.withLock {
             wantedAspect = aspectRatio
             val current = selected
@@ -205,6 +224,11 @@ class CameraXController(
         val maxZoom = cam.cameraInfo.zoomState.value?.maxZoomRatio ?: return
         val minZoom = cam.cameraInfo.zoomState.value?.minZoomRatio ?: 1f
         val target = if (zoomRatio <= 0f) minZoom else zoomRatio.coerceIn(minZoom, maxZoom)
+        // Remembered because a rebind (aspect/resolution/stream-format change) tears the
+        // session down and the crop region with it: without this the next frame silently
+        // jumps back to 1x and the user's framing is lost (SPEC 66: framing differences
+        // must not surprise the user; below 1x this also drops the shot off the ultrawide).
+        requestedZoom = target
         cam.cameraControl.setZoomRatio(target)
     }
 
@@ -234,8 +258,15 @@ class CameraXController(
             )
         }
         return try {
+            // The bound stream decides the capture call, not the plan's final source: RAW and
+            // RAW_JPEG both go through captureRaw, the latter with two output options so the
+            // dual takePicture gets its DNG and its companion JPEG. Routing SYSTEM + JPG+RAW by
+            // plan source alone made it fail on device with "Simultaneous capture RAW and JPEG
+            // needs two output file options" (found during the 2026-10-08 device pass).
+            val rawStream = captureFormat == ImageCapture.OUTPUT_FORMAT_RAW ||
+                captureFormat == ImageCapture.OUTPUT_FORMAT_RAW_JPEG
             when {
-                plan.source == CaptureSource.RAW_SENSOR -> captureRaw(request, plan)
+                rawStream -> captureRaw(request, plan)
                 plan.source == CaptureSource.YUV -> captureYuv(request)
                 else -> captureJpeg(request, plan)
             }
@@ -246,9 +277,27 @@ class CameraXController(
         }
     }
 
+    /**
+     * Terminal teardown, called when the owning ViewModel is cleared. Before this the
+     * analyzer thread, its channel and any buffered frame survived the whole process
+     * (AGENTS 44): a buffered [ImageProxy] holds a HAL buffer open.
+     */
     override suspend fun close() {
         provider?.unbindAll()
+        provider = null
+        preview = null
+        imageCapture = null
+        imageAnalysis = null
+        previewView = null
         camera = null
+        selected = null
+        boundIsp = null
+        boundAspect = null
+        analysisBound = false
+        boundAnalysisFullResolution = false
+        analysisChannel.close()
+        analysisChannel.tryReceive().getOrNull()?.close()
+        analysisExecutor.shutdown()
         _state.value = CameraState.Uninitialized
     }
 
@@ -257,55 +306,44 @@ class CameraXController(
     private suspend fun ensureBoundFor(plan: CapturePlan, request: PhotoCaptureRequest) {
         // NATURAL/PURE still need a temporary RAW stream for JPG-only captures;
         // saveRaw controls persistence, not whether the app develops the image.
-        val wantedFormat = when {
-            plan.source == CaptureSource.RAW_SENSOR && plan.saveRaw && wantsHalJpeg(request) ->
-                ImageCapture.OUTPUT_FORMAT_RAW_JPEG
-            plan.source == CaptureSource.RAW_SENSOR -> ImageCapture.OUTPUT_FORMAT_RAW
-            plan.saveRaw -> ImageCapture.OUTPUT_FORMAT_RAW_JPEG
-            else -> ImageCapture.OUTPUT_FORMAT_JPEG
-        }
+        val wantedFormat = wantedOutputFormat(plan, request)
         val wantedAnalysis = plan.source == CaptureSource.YUV
+        // The analysis stream exists only to serve a YUV still, so when it *is* the capture
+        // source it is bound at the largest size the camera offers. Left to CameraX's default
+        // analysis strategy the still came out 640x480 (0.3 MP, measured on the Oppo) against
+        // 1600x1200 when asked for the largest — and a wide-angle framing has no RAW to fall
+        // back to, so this stream is the whole image.
+        analysisFullResolution = wantedAnalysis
         // SYSTEM keeps the device's own processing defaults; NATURAL/PURE ask the
         // ISP for the least processing the hardware reports (SPEC 23).
-        wantedIsp = if (request.profile == com.adin.naturalcam.domain.ProcessingProfile.SYSTEM) {
+        wantedIsp = if (request.profile == ProcessingProfile.SYSTEM) {
             null
         } else {
             plan.ispConfiguration
         }
-        if (wantedFormat != captureFormat || wantedAnalysis != analysisBound || wantedIsp != boundIsp) {
+        if (wantedFormat != captureFormat ||
+            wantedAnalysis != analysisBound ||
+            wantedIsp != boundIsp ||
+            analysisFullResolution != boundAnalysisFullResolution
+        ) {
             captureFormat = wantedFormat
             analysisBound = wantedAnalysis
             rebind(selected ?: request.cameraId, keepAnalysis = wantedAnalysis)
         }
     }
 
-    @OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+    @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
     private fun applyIspOptions(builder: ImageCapture.Builder, isp: IspConfiguration) {
         val extender = androidx.camera.camera2.interop.Camera2Interop.Extender(builder)
-        val nr = when (isp.noiseReduction) {
-            NoiseReductionMode.OFF -> android.hardware.camera2.CameraMetadata.NOISE_REDUCTION_MODE_OFF
-            NoiseReductionMode.MINIMAL -> android.hardware.camera2.CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL
-            NoiseReductionMode.FAST -> android.hardware.camera2.CameraMetadata.NOISE_REDUCTION_MODE_FAST
-            NoiseReductionMode.HIGH_QUALITY -> android.hardware.camera2.CameraMetadata.NOISE_REDUCTION_MODE_HIGH_QUALITY
-            NoiseReductionMode.ZERO_SHUTTER_LAG -> android.hardware.camera2.CameraMetadata.NOISE_REDUCTION_MODE_ZERO_SHUTTER_LAG
-            NoiseReductionMode.UNKNOWN -> null
-        }
-        if (nr != null) {
+        IspOptionMapping.noiseReductionToCamera2(isp.noiseReduction)?.let { nr ->
             extender.setCaptureRequestOption(android.hardware.camera2.CaptureRequest.NOISE_REDUCTION_MODE, nr)
         }
-        val edge = when (isp.edgeMode) {
-            EdgeMode.OFF -> android.hardware.camera2.CameraMetadata.EDGE_MODE_OFF
-            EdgeMode.FAST -> android.hardware.camera2.CameraMetadata.EDGE_MODE_FAST
-            EdgeMode.HIGH_QUALITY -> android.hardware.camera2.CameraMetadata.EDGE_MODE_HIGH_QUALITY
-            EdgeMode.ZERO_SHUTTER_LAG -> android.hardware.camera2.CameraMetadata.EDGE_MODE_ZERO_SHUTTER_LAG
-            EdgeMode.UNKNOWN -> null
-        }
-        if (edge != null) {
+        IspOptionMapping.edgeToCamera2(isp.edgeMode)?.let { edge ->
             extender.setCaptureRequestOption(android.hardware.camera2.CaptureRequest.EDGE_MODE, edge)
         }
     }
 
-    @OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+    @androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
     private fun rebind(cameraId: CameraId, keepAnalysis: Boolean) {
         val provider = this.provider ?: throw CameraException(CameraError.CameraUnavailable("not initialized"))
         val view = previewView ?: throw CameraException(CameraError.SessionConfigurationFailed("no preview surface"))
@@ -332,7 +370,17 @@ class CameraXController(
         fun buildAnalysis(): ImageAnalysis {
             val analysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setResolutionSelector(OutputResolutionMapping.resolutionSelector(wantedAspect, wantedHighestResolution))
+                // Without a target rotation the analysis frames carry no display relationship, and
+                // a YUV still came out in sensor orientation (sideways) — ImageProxy.imageInfo
+                // .rotationDegrees is derived from this, and the app runs portrait-locked, so the
+                // display rotation at bind time is the one that matters.
+                .setTargetRotation(previewView?.display?.rotation ?: android.view.Surface.ROTATION_0)
+                .setResolutionSelector(
+                    OutputResolutionMapping.resolutionSelector(
+                        wantedAspect,
+                        wantedHighestResolution || analysisFullResolution,
+                    ),
+                )
                 .build()
             analysis.setAnalyzer(analysisExecutor) { proxy -> onAnalysisFrame(proxy) }
             return analysis
@@ -356,8 +404,11 @@ class CameraXController(
                 this.imageCapture = capture
                 this.imageAnalysis = analysis
                 analysisBound = useAnalysis
+                boundAnalysisFullResolution = useAnalysis && analysisFullResolution
                 boundIsp = if (useIsp) wantedIsp else null
                 boundAspect = wantedAspect
+                // A new session starts at 1x; re-apply what the user had (see setZoom).
+                if (requestedZoom != 1f) camera?.cameraControl?.setZoomRatio(requestedZoom)
                 return
             } catch (e: Exception) {
                 lastError = e
@@ -372,15 +423,30 @@ class CameraXController(
     /**
      * SYSTEM's final image is the platform JPEG, so RAW_AND_FINAL needs the dual
      * RAW+JPEG stream; RAW_ONLY never wants the JPEG. Single source of truth for
-     * stream format and save routing (they diverged once — caught on device).
+     * save routing; [wantedOutputFormat] derives the stream it needs.
      */
     private fun wantsHalJpeg(request: PhotoCaptureRequest): Boolean =
-        request.rawMode == RawMode.RAW_AND_FINAL &&
-            request.profile == com.adin.naturalcam.domain.ProcessingProfile.SYSTEM
+        request.rawMode == RawMode.RAW_AND_FINAL && request.profile == ProcessingProfile.SYSTEM
+
+    /**
+     * Stream format for a plan; the only place this decision is made.
+     *
+     * [wantsHalJpeg] is what SYSTEM's RAW_AND_FINAL output needs, because the platform JPEG
+     * *is* its final image. RAW-only output wants no JPEG at all, so it binds a plain RAW
+     * stream even though [CapturePlan.saveRaw] is set.
+     */
+    private fun wantedOutputFormat(plan: CapturePlan, request: PhotoCaptureRequest): Int = when {
+        plan.source == CaptureSource.RAW_SENSOR && plan.saveRaw && wantsHalJpeg(request) ->
+            ImageCapture.OUTPUT_FORMAT_RAW_JPEG
+        plan.source == CaptureSource.RAW_SENSOR -> ImageCapture.OUTPUT_FORMAT_RAW
+        wantsHalJpeg(request) -> ImageCapture.OUTPUT_FORMAT_RAW_JPEG
+        plan.saveRaw -> ImageCapture.OUTPUT_FORMAT_RAW
+        else -> ImageCapture.OUTPUT_FORMAT_JPEG
+    }
 
     private suspend fun captureRaw(request: PhotoCaptureRequest, plan: CapturePlan): CapturedFrames {
         capturesDir.mkdirs()
-        val dngFile = File(capturesDir, "${request.captureId.value}.dng")
+        val dngFile = File(capturesDir, FileNaming.tempName(request.captureId.value, ".dng"))
         val jpegStream = if (wantsHalJpeg(request)) ByteArrayOutputStream() else null
         val rotation = currentRotationDegrees()
         val capture = imageCapture
@@ -391,6 +457,9 @@ class CameraXController(
 
         Log.d(TAG, "capture ${request.captureId.value} raw takePicture fmt=$captureFormat -> ${dngFile.name}")
         suspendCancellableCoroutine { cont ->
+            // A capture timeout or screen teardown cancels this continuation; the temp DNG
+            // must not outlive the capture (AGENTS 51).
+            cont.invokeOnCancellation { dngFile.delete() }
             val savedFlags = java.util.concurrent.atomic.AtomicInteger(0)
             val expected = if (jpegOptions != null) 2 else 1
             val callback = object : ImageCapture.OnImageSavedCallback {
@@ -466,16 +535,29 @@ class CameraXController(
         )
     }
 
-    private var analysisChannel = Channel<ImageProxy>(capacity = Channel.CONFLATED)
+    /**
+     * Newest frame wins without leaking the one it replaces. A CONFLATED channel drops
+     * the buffered element silently, and an unclosed [ImageProxy] is never returned to
+     * the HAL — which stalls the analysis stream for the rest of the session (AGENTS 44).
+     * The analyzer runs on its own single thread, so this drain/send pair cannot race
+     * itself.
+     */
+    private val analysisChannel = Channel<ImageProxy>(capacity = Channel.CONFLATED)
 
     private fun onAnalysisFrame(proxy: ImageProxy) {
-        val result = analysisChannel.trySend(proxy)
-        if (result.isFailure) proxy.close() // frame not needed; never leak images (AGENTS 44)
+        analysisChannel.tryReceive().getOrNull()?.close()
+        if (analysisChannel.trySend(proxy).isFailure) proxy.close()
     }
 
     private suspend fun captureYuv(request: PhotoCaptureRequest): CapturedFrames {
+        // Drop whatever was buffered before the shutter press: that is a preview frame,
+        // not the still the user asked for.
+        analysisChannel.tryReceive().getOrNull()?.close()
         val proxy = analysisChannel.receive()
-        val rotation = currentRotationDegrees()
+        // CameraX's own display relationship for this frame; currentRotationDegrees() reports the
+        // display rotation only, which is 0 when the phone is held upright, so it left YUV stills
+        // in sensor orientation (sideways).
+        val rotation = proxy.imageInfo.rotationDegrees
         try {
             val yuv = proxy.toYuvImage()
             return CapturedFrames(
@@ -532,41 +614,6 @@ class CameraXController(
             )
         }
 
-    private fun buildLensOptions(infos: List<androidx.camera.core.CameraInfo>): List<LensOption> {
-        val scanned = infos.map { it to (CameraCapabilityScanner.scan(it)) }
-        // Main camera heuristic: highest JPEG resolution among back cameras;
-        // labels derive from reported focal lengths (documented in LIMITATIONS.md).
-        val back = scanned.filter { it.second.lensFacing == LensFacing.BACK }
-        val main = back.maxByOrNull { cap ->
-            cap.second.resolutions[com.adin.naturalcam.domain.CaptureFormat.JPEG]
-                ?.maxOfOrNull { it.width.toLong() * it.height } ?: 0L
-        }?.second
-        val mainFocal = main?.focalLengthsMm?.maxOrNull()
-
-        return scanned.map { (_, cap) ->
-            val focal = cap.focalLengthsMm.maxOrNull()
-            val label = when {
-                cap.lensFacing == LensFacing.FRONT -> "Front"
-                focal != null && mainFocal != null && mainFocal > 0f && cap.cameraId != main?.cameraId -> {
-                    val ratio = focal / mainFocal
-                    if (ratio < 1f) String.format(java.util.Locale.US, "%.1f×", ratio)
-                    else String.format(java.util.Locale.US, "%.0f×", ratio)
-                }
-                cap.cameraId == main?.cameraId -> "1×"
-                cap.lensFacing == LensFacing.BACK -> "Back"
-                else -> "Camera"
-            }
-            LensOption(
-                cameraId = cap.cameraId,
-                label = label,
-                lensFacing = cap.lensFacing,
-                isDefault = cap.cameraId == main?.cameraId ||
-                    (main == null && cap.cameraId == scanned.first().second.cameraId),
-                focalLengthMm = focal ?: 1f,
-            )
-        }
-    }
-
     private fun ImageProxy.toYuvImage(): YuvImage {
         val planes = planes
         val y = planes[0].buffer.copyAll()
@@ -601,12 +648,7 @@ class CameraXController(
         else -> CameraError.CaptureFailed(e.message)
     }
 
-    private fun mapException(e: Exception): CameraError = when (e) {
-        is CameraException -> e.error
-        is IOException -> CameraError.StorageFailed(e.message)
-        is IllegalArgumentException -> CameraError.SessionConfigurationFailed(e.message)
-        else -> CameraError.CaptureFailed(e.message ?: e.javaClass.simpleName)
-    }
+    private fun mapException(e: Exception): CameraError = e.toCameraError()
 }
 
 /** Capture-side NATURAL bias selected to protect highlights after device validation. */

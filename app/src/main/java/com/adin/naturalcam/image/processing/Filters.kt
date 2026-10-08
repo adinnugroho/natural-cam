@@ -1,11 +1,16 @@
 package com.adin.naturalcam.image.processing
 
 import com.adin.naturalcam.image.core.CpuParallel
+import com.adin.naturalcam.image.core.LUMA_B
+import com.adin.naturalcam.image.core.LUMA_G
+import com.adin.naturalcam.image.core.LUMA_R
 import com.adin.naturalcam.image.core.LensShadingMap
 import com.adin.naturalcam.image.core.RgbImage
+import com.adin.naturalcam.image.core.bilinearGridGain
+import com.adin.naturalcam.image.core.luminance
+import com.adin.naturalcam.image.core.srgbEncode
 import kotlin.math.abs
 import kotlin.math.floor
-import kotlin.math.pow
 /**
  * Restrained 2×2 chroma denoising. Each pixel keeps its own linear luminance;
  * only color differences are blended toward the block mean. Real luminance
@@ -51,10 +56,10 @@ object NoiseReducer {
                     val r1 = rgb.r[i1]; val g1 = rgb.g[i1]; val b1 = rgb.b[i1]
                     val r2 = rgb.r[i2]; val g2 = rgb.g[i2]; val b2 = rgb.b[i2]
                     val r3 = rgb.r[i3]; val g3 = rgb.g[i3]; val b3 = rgb.b[i3]
-                    val l0 = linearLuminance(r0, g0, b0)
-                    val l1 = linearLuminance(r1, g1, b1)
-                    val l2 = linearLuminance(r2, g2, b2)
-                    val l3 = linearLuminance(r3, g3, b3)
+                    val l0 = luminance(r0, g0, b0)
+                    val l1 = luminance(r1, g1, b1)
+                    val l2 = luminance(r2, g2, b2)
+                    val l3 = luminance(r3, g3, b3)
                     val meanLuminance = (l0 + l1 + l2 + l3) * 0.25f
                     val meanChromaR = (r0 - l0 + r1 - l1 + r2 - l2 + r3 - l3) * 0.25f
                     val meanChromaG = (g0 - l0 + g1 - l1 + g2 - l2 + g3 - l3) * 0.25f
@@ -97,9 +102,6 @@ object NoiseReducer {
         rgb.b[index] = outputLuminance + sourceChromaB +
             chromaStrength * (meanChromaB - sourceChromaB)
     }
-
-    private fun linearLuminance(r: Float, g: Float, b: Float): Float =
-        0.2126f * r + 0.7152f * g + 0.0722f * b
 }
 
 /**
@@ -131,9 +133,6 @@ object ChromaSmoother {
 
     /** Ceiling on the per-pixel strength; replacing chroma outright reads as a smear. */
     const val MAX_STRENGTH = 0.85f
-
-    private const val LUMA_R = 0.2126f
-    private const val LUMA_B = 0.0722f
 
     fun apply(rgb: RgbImage, map: LensShadingMap?, baseStrength: Float = 0f): RgbImage {
         if (map != null && (map.imageWidth != rgb.width || map.imageHeight != rgb.height)) return rgb
@@ -184,13 +183,13 @@ object ChromaSmoother {
             }
         }
 
-        // Pass 2: separable [1,2,1] per plane.
+        // Pass 2: separable [1,2,1] per plane (shared with the sharpener/bloom blur).
         val blurredCr = FloatArray(planeWidth * planeHeight)
         val blurredCb = FloatArray(planeWidth * planeHeight)
-        horizontal121(crPlane, planeWidth, planeHeight)
-        vertical121(crPlane, blurredCr, planeWidth, planeHeight)
-        horizontal121(cbPlane, planeWidth, planeHeight)
-        vertical121(cbPlane, blurredCb, planeWidth, planeHeight)
+        blur121Horizontal(crPlane, crPlane, planeWidth, planeHeight)
+        blur121Vertical(crPlane, blurredCr, planeWidth, planeHeight)
+        blur121Horizontal(cbPlane, cbPlane, planeWidth, planeHeight)
+        blur121Vertical(cbPlane, blurredCb, planeWidth, planeHeight)
 
         // Pass 3: rebuild, keeping each pixel's own luma exactly.
         CpuParallel.forEach(height, minItemsPerTask = 128) { startRow, endRow ->
@@ -214,14 +213,10 @@ object ChromaSmoother {
                     val gain = if (grid == null) {
                         1f
                     } else {
-                        val low = columnLow[x]
-                        val high = columnHigh[x]
-                        val fracX = columnFrac[x]
-                        val topLeft = grid[gainBaseLow + low]
-                        val top = topLeft + (grid[gainBaseLow + high] - topLeft) * fracX
-                        val bottomLeft = grid[gainBaseHigh + low]
-                        val bottom = bottomLeft + (grid[gainBaseHigh + high] - bottomLeft) * fracX
-                        top + (bottom - top) * gainRowFrac
+                        bilinearGridGain(
+                            grid, gainBaseLow, gainBaseHigh,
+                            columnLow[x], columnHigh[x], columnFrac[x], gainRowFrac,
+                        )
                     }
                     // Base strength covers the sensor's own chroma noise anywhere in
                     // the frame; the shading term adds back what the correction
@@ -263,36 +258,6 @@ object ChromaSmoother {
             }
         }
         return rgb
-    }
-
-    /** Horizontal [1,2,1], in place. Each row is independent, so this parallelizes. */
-    private fun horizontal121(plane: FloatArray, width: Int, height: Int) {
-        CpuParallel.forEach(height, minItemsPerTask = 64) { start, end ->
-            for (y in start until end) {
-                val row = y * width
-                var left = plane[row]
-                for (x in 0 until width) {
-                    val mid = plane[row + x]
-                    val right = plane[row + (x + 1).coerceAtMost(width - 1)]
-                    plane[row + x] = (left + 2f * mid + right) * 0.25f
-                    left = mid
-                }
-            }
-        }
-    }
-
-    /** Vertical [1,2,1] from [source] into [destination]; the buffers must differ. */
-    private fun vertical121(source: FloatArray, destination: FloatArray, width: Int, height: Int) {
-        CpuParallel.forEach(height, minItemsPerTask = 64) { start, end ->
-            for (y in start until end) {
-                val up = (y - 1).coerceAtLeast(0) * width
-                val mid = y * width
-                val down = (y + 1).coerceAtMost(height - 1) * width
-                for (x in 0 until width) {
-                    destination[mid + x] = (source[up + x] + 2f * source[mid + x] + source[down + x]) * 0.25f
-                }
-            }
-        }
     }
 
     private fun sample(
@@ -339,24 +304,6 @@ object NoiseEstimator {
     /** Roughly the standard deviation of the horizontal high-pass for white noise. */
     private const val HIGH_PASS_GAIN = 1.22f
 
-    /** Curve resolution; the transfer is precomputed once into [transfer]. */
-    private const val LUT_SIZE = 4096
-
-    private val transfer = FloatArray(LUT_SIZE + 1) { index ->
-        val linear = index.toFloat() / LUT_SIZE
-        if (linear <= 0.0031308f) linear * 12.92f else 1.055f * linear.pow(1f / 2.4f) - 0.055f
-    }.also { table -> table[LUT_SIZE] = 1f }
-
-    /** sRGB output transfer, matching `OutputTransformer`. */
-    private fun encode(linear: Float): Float {
-        val scaled = linear * LUT_SIZE
-        if (scaled <= 0f) return 0f
-        if (scaled >= LUT_SIZE) return 1f
-        val index = scaled.toInt()
-        val fraction = scaled - index
-        return transfer[index] + (transfer[index + 1] - transfer[index]) * fraction
-    }
-
     fun shadowGrain(rgb: RgbImage): Float {
         val width = rgb.width
         val height = rgb.height
@@ -371,7 +318,7 @@ object NoiseEstimator {
         while (y < height - 1) {
             var x = 1
             while (x < width - 1) {
-                val encoded = encode(lumaAt(red, green, blue, y * width + x))
+                val encoded = srgbEncode(lumaAt(red, green, blue, y * width + x))
                 val bin = (encoded * BINS).toInt()
                 if (bin in 0 until BINS) {
                     histogram[bin]++
@@ -400,10 +347,10 @@ object NoiseEstimator {
             var x = 1
             while (x < width - 1) {
                 val i = y * width + x
-                val encoded = encode(lumaAt(red, green, blue, i))
+                val encoded = srgbEncode(lumaAt(red, green, blue, i))
                 if (encoded <= threshold) {
                     val horizontal =
-                        0.5f * (encode(lumaAt(red, green, blue, i - 1)) + encode(lumaAt(red, green, blue, i + 1)))
+                        0.5f * (srgbEncode(lumaAt(red, green, blue, i - 1)) + srgbEncode(lumaAt(red, green, blue, i + 1)))
                     sum += abs(encoded - horizontal)
                     samples++
                 }
@@ -416,7 +363,7 @@ object NoiseEstimator {
     }
 
     private fun lumaAt(red: FloatArray, green: FloatArray, blue: FloatArray, index: Int): Float =
-        0.2126f * red[index] + 0.7152f * green[index] + 0.0722f * blue[index]
+        luminance(red[index], green[index], blue[index])
 }
 
 /**
@@ -440,10 +387,6 @@ object NoiseEstimator {
  */
 object LumaDenoiser {
 
-    private const val LUMA_R = 0.2126f
-    private const val LUMA_G = 0.7152f
-    private const val LUMA_B = 0.0722f
-
     fun apply(rgb: RgbImage, strength: Float): RgbImage {
         val amount = strength.coerceIn(0f, 1f)
         if (amount == 0f) return rgb
@@ -464,20 +407,13 @@ object LumaDenoiser {
             }
         }
 
-        // Horizontal [1,2,1] in place: rows are independent, so this parallelizes.
-        CpuParallel.forEach(height, minItemsPerTask = 128) { start, end ->
-            for (y in start until end) {
-                val row = y * width
-                var left = plane[row]
-                for (x in 0 until width) {
-                    val mid = plane[row + x]
-                    val right = plane[row + (x + 1).coerceAtMost(width - 1)]
-                    plane[row + x] = (left + 2f * mid + right) * 0.25f
-                    left = mid
-                }
-            }
-        }
+        // Horizontal [1,2,1] in place, via the shared blur helper so the kernel is
+        // identical to the sharpener/bloom blur. Rows are independent, so it parallelizes.
+        blur121Horizontal(plane, plane, width, height)
 
+        // Vertical [1,2,1] stays fused with the blend below rather than calling
+        // blur121Vertical into a scratch plane: this stage deliberately owns a single
+        // full-frame buffer, and a shared vertical pass would need a second one.
         CpuParallel.forEach(height, minItemsPerTask = 128) { start, end ->
             for (y in start until end) {
                 val up = (y - 1).coerceAtLeast(0) * width
@@ -671,24 +607,29 @@ object BloomStage {
         maskWidth: Int,
         maskHeight: Int,
     ) {
-        for (my in 0 until maskHeight) {
-            val yStart = my * height / maskHeight
-            val yEnd = maxOf(yStart + 1, (my + 1) * height / maskHeight)
-            for (mx in 0 until maskWidth) {
-                val xStart = mx * width / maskWidth
-                val xEnd = maxOf(xStart + 1, (mx + 1) * width / maskWidth)
-                var peak = 0f
-                for (y in yStart until yEnd) {
-                    val row = y * width
-                    for (x in xStart until xEnd) {
-                        val value = channel[row + x].coerceAtLeast(0f)
-                        if (value <= THRESHOLD) continue
-                        val knee = ((value - THRESHOLD) / KNEE).coerceIn(0f, 1f)
-                        val highlight = value * knee
-                        if (highlight > peak) peak = highlight
+        // Mask rows are independent and each cell writes only its own entry. This ran
+        // serially over every pixel of every channel and was the bloom control's cost.
+        CpuParallel.forEach(maskHeight, minItemsPerTask = 8) { startRow, endRow ->
+            for (my in startRow until endRow) {
+                val yStart = my * height / maskHeight
+                val yEnd = maxOf(yStart + 1, (my + 1) * height / maskHeight)
+                val maskRow = my * maskWidth
+                for (mx in 0 until maskWidth) {
+                    val xStart = mx * width / maskWidth
+                    val xEnd = maxOf(xStart + 1, (mx + 1) * width / maskWidth)
+                    var peak = 0f
+                    for (y in yStart until yEnd) {
+                        val row = y * width
+                        for (x in xStart until xEnd) {
+                            val value = channel[row + x].coerceAtLeast(0f)
+                            if (value <= THRESHOLD) continue
+                            val knee = ((value - THRESHOLD) / KNEE).coerceIn(0f, 1f)
+                            val highlight = value * knee
+                            if (highlight > peak) peak = highlight
+                        }
                     }
+                    mask[maskRow + mx] = peak
                 }
-                mask[my * maskWidth + mx] = peak
             }
         }
     }
@@ -802,7 +743,7 @@ object GrainStage {
                     val r = ((pixel shr 16) and 0xFF).toFloat()
                     val g = ((pixel shr 8) and 0xFF).toFloat()
                     val b = (pixel and 0xFF).toFloat()
-                    val luma = 0.2126f * r + 0.7152f * g + 0.0722f * b
+                    val luma = luminance(r, g, b)
                     val normalized = luma / 255f
                     val midtone = MIDTONE_FLOOR +
                         (1f - MIDTONE_FLOOR) * 4f * normalized * (1f - normalized)
@@ -854,36 +795,42 @@ object GrainStage {
         maskWidth: Int,
         maskHeight: Int,
     ) {
-        for (my in 0 until maskHeight) {
-            val yStart = my * height / maskHeight
-            val yEnd = maxOf(yStart + 1, (my + 1) * height / maskHeight)
-            for (mx in 0 until maskWidth) {
-                val xStart = mx * width / maskWidth
-                val xEnd = maxOf(xStart + 1, (mx + 1) * width / maskWidth)
-                var peak = 0f
-                for (y in yStart until yEnd) {
-                    val row = y * width
-                    val down = if (y < height - 1) row + width else row
-                    for (x in xStart until xEnd) {
-                        val i = row + x
-                        val right = if (x < width - 1) i + 1 else i
-                        val luma = lumaAt(argb, i)
-                        val dx = abs(lumaAt(argb, right) - luma)
-                        val dy = abs(lumaAt(argb, down + x) - luma)
-                        val energy = dx + dy
-                        if (energy > peak) peak = energy
+        // Independent mask rows, same as the bloom mask: this was a serial full-frame scan.
+        CpuParallel.forEach(maskHeight, minItemsPerTask = 8) { startRow, endRow ->
+            for (my in startRow until endRow) {
+                val yStart = my * height / maskHeight
+                val yEnd = maxOf(yStart + 1, (my + 1) * height / maskHeight)
+                val maskRow = my * maskWidth
+                for (mx in 0 until maskWidth) {
+                    val xStart = mx * width / maskWidth
+                    val xEnd = maxOf(xStart + 1, (mx + 1) * width / maskWidth)
+                    var peak = 0f
+                    for (y in yStart until yEnd) {
+                        val row = y * width
+                        val down = if (y < height - 1) row + width else row
+                        for (x in xStart until xEnd) {
+                            val i = row + x
+                            val right = if (x < width - 1) i + 1 else i
+                            val luma = lumaAt(argb, i)
+                            val dx = abs(lumaAt(argb, right) - luma)
+                            val dy = abs(lumaAt(argb, down + x) - luma)
+                            val energy = dx + dy
+                            if (energy > peak) peak = energy
+                        }
                     }
+                    detail[maskRow + mx] = peak / 255f
                 }
-                detail[my * maskWidth + mx] = peak / 255f
             }
         }
     }
 
     private fun lumaAt(argb: IntArray, index: Int): Float {
         val pixel = argb[index]
-        return 0.2126f * ((pixel shr 16) and 0xFF) +
-            0.7152f * ((pixel shr 8) and 0xFF) +
-            0.0722f * (pixel and 0xFF)
+        return luminance(
+            ((pixel shr 16) and 0xFF).toFloat(),
+            ((pixel shr 8) and 0xFF).toFloat(),
+            (pixel and 0xFF).toFloat(),
+        )
     }
 
     /**
@@ -940,37 +887,51 @@ object GrainStage {
 }
 
 /**
- * Separable binomial blur [1,2,1] with edge replication. Shared by denoise and
- * sharpen so their spatial footprint stays identical. Returns a freshly
- * blurred array; [work] is an n-sized scratch buffer the caller owns.
+ * Horizontal pass of a separable binomial [1,2,1] blur with edge replication.
+ * Each row is independent, so it parallelizes. Safe with `src === dst`: each
+ * sample is read before its destination slot is written, and the left neighbour
+ * is carried in a local rather than re-read.
  */
-internal fun blur3x3(src: FloatArray, w: Int, h: Int, work: FloatArray): FloatArray {
-    val out = FloatArray(w * h)
-    blur3x3Into(src, out, w, h, work)
-    return out
-}
-
-internal fun blur3x3Into(src: FloatArray, out: FloatArray, w: Int, h: Int, work: FloatArray) {
-    // Horizontal pass into scratch.
+internal fun blur121Horizontal(src: FloatArray, dst: FloatArray, w: Int, h: Int) {
     CpuParallel.forEach(h, minItemsPerTask = 128) { startRow, endRow ->
         for (y in startRow until endRow) {
             val row = y * w
+            var left = src[row]
             for (x in 0 until w) {
-                val left = src[row + if (x > 0) x - 1 else 0]
                 val mid = src[row + x]
-                val right = src[row + if (x < w - 1) x + 1 else w - 1]
-                work[row + x] = (left + 2f * mid + right) * 0.25f
+                val right = src[row + (x + 1).coerceAtMost(w - 1)]
+                dst[row + x] = (left + 2f * mid + right) * 0.25f
+                left = mid
             }
         }
     }
-    // Vertical pass into caller-owned output.
+}
+
+/**
+ * Vertical pass of the same [1,2,1] blur; [src] and [dst] must differ, since a
+ * row is read as the neighbour of the rows it is written among.
+ */
+internal fun blur121Vertical(src: FloatArray, dst: FloatArray, w: Int, h: Int) {
     CpuParallel.forEach(h, minItemsPerTask = 128) { startRow, endRow ->
         for (y in startRow until endRow) {
-            val upRow = if (y > 0) y - 1 else 0
-            val downRow = if (y < h - 1) y + 1 else h - 1
+            val up = (y - 1).coerceAtLeast(0) * w
+            val mid = y * w
+            val down = (y + 1).coerceAtMost(h - 1) * w
             for (x in 0 until w) {
-                out[y * w + x] = (work[upRow * w + x] + 2f * work[y * w + x] + work[downRow * w + x]) * 0.25f
+                dst[mid + x] = (src[up + x] + 2f * src[mid + x] + src[down + x]) * 0.25f
             }
         }
     }
+}
+
+/**
+ * Separable binomial blur [1,2,1] with edge replication, into a caller-owned
+ * output buffer. Shared by the sharpener and the bloom mask so their spatial
+ * footprint stays identical; [work] is an n-sized scratch buffer the caller owns.
+ * Composed from [blur121Horizontal]/[blur121Vertical], the same primitives the
+ * chroma smoother and the luma denoiser use.
+ */
+internal fun blur3x3Into(src: FloatArray, out: FloatArray, w: Int, h: Int, work: FloatArray) {
+    blur121Horizontal(src, work, w, h)
+    blur121Vertical(work, out, w, h)
 }

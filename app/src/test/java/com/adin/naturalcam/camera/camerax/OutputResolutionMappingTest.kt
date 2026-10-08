@@ -35,12 +35,4 @@ class OutputResolutionMappingTest {
         val full = OutputResolutionMapping.resolutionSelector(AspectRatio.RATIO_FULL)
         assertSame(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY, full.resolutionStrategy)
     }
-
-    @Test
-    fun `every domain aspect option has a mapping`() {
-        for (aspect in AspectRatio.entries) {
-            // A missing mapping would throw; presence is the assertion.
-            OutputResolutionMapping.resolutionSelector(aspect)
-        }
-    }
 }

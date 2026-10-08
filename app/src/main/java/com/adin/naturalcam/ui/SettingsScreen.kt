@@ -1,6 +1,5 @@
 package com.adin.naturalcam.ui
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -10,19 +9,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,7 +31,6 @@ import com.adin.naturalcam.domain.AspectRatio
 import com.adin.naturalcam.domain.ProcessingProfile
 import com.adin.naturalcam.domain.RawMode
 import com.adin.naturalcam.ui.theme.CameraBlack
-import com.adin.naturalcam.ui.theme.CameraControl
 import com.adin.naturalcam.ui.theme.CameraOrange
 import com.adin.naturalcam.ui.theme.CameraWhite
 import com.adin.naturalcam.ui.theme.cameraChoiceColors
@@ -60,28 +53,7 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onOpenDeviceInfo: () -> Unit,
 ) {
-    Scaffold(
-        containerColor = CameraBlack,
-        topBar = {
-            TopAppBar(
-                title = { Text("PENGATURAN") },
-                navigationIcon = {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_back),
-                        contentDescription = "Kembali",
-                        modifier = Modifier
-                            .padding(16.dp)
-                            .clickable(onClick = onBack),
-                        tint = CameraWhite,
-                    )
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = CameraBlack,
-                    titleContentColor = CameraWhite,
-                ),
-            )
-        },
-    ) { padding ->
+    CameraPage(title = "PENGATURAN", onBack = onBack) { padding ->
         Column(
             Modifier
                 .fillMaxSize()
@@ -173,18 +145,7 @@ fun SettingsScreen(
 private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(title, color = CameraOrange, style = MaterialTheme.typography.labelLarge)
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
-            color = CameraControl,
-            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
-        ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                content = content,
-            )
-        }
+        CameraPanel(content = content)
     }
 }
 

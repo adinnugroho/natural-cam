@@ -1,6 +1,5 @@
 package com.adin.naturalcam.image
 
-import com.adin.naturalcam.image.core.RgbImage
 import com.adin.naturalcam.image.processing.LumaDenoiser
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -28,24 +27,9 @@ class LumaDenoiserTest {
         return Math.sqrt(sum / count).toFloat()
     }
 
-    private fun image(size: Int, seedStart: Long): RgbImage {
-        val rgb = RgbImage(size, size)
-        var seed = seedStart
-        for (i in rgb.r.indices) {
-            seed = (seed * 1103515245 + 12345) and 0x7FFFFFFF
-            val grain = ((seed % 2001) / 1000f - 1f) * 0.02f
-            seed = (seed * 1103515245 + 12345) and 0x7FFFFFFF
-            val chroma = ((seed % 2001) / 1000f - 1f) * 0.03f
-            rgb.r[i] = 0.5f + grain + chroma
-            rgb.g[i] = 0.5f + grain
-            rgb.b[i] = 0.5f + grain - chroma * 0.5f
-        }
-        return rgb
-    }
-
     @Test
     fun `colour differences are preserved exactly`() {
-        val rgb = image(32, 4242L)
+        val rgb = TestImages.randomImage(32, 4242L)
         val rg = FloatArray(rgb.r.size) { rgb.r[it] - rgb.g[it] }
         val bg = FloatArray(rgb.r.size) { rgb.b[it] - rgb.g[it] }
         LumaDenoiser.apply(rgb, 0.7f)
@@ -59,15 +43,7 @@ class LumaDenoiserTest {
     @Test
     fun `common mode grain drops`() {
         val size = 64
-        val rgb = RgbImage(size, size)
-        var seed = 11L
-        for (i in rgb.r.indices) {
-            seed = (seed * 1103515245 + 12345) and 0x7FFFFFFF
-            val value = 0.5f + ((seed % 2001) / 1000f - 1f) * 0.02f
-            rgb.r[i] = value
-            rgb.g[i] = value
-            rgb.b[i] = value
-        }
+        val rgb = TestImages.noisyGray(size, noise = 0.02f, seed = 11L)
         val before = highFrequency(rgb.g, size)
         LumaDenoiser.apply(rgb, 0.5f)
         assertTrue("grain ${highFrequency(rgb.g, size)} not below $before", highFrequency(rgb.g, size) < before * 0.8f)
@@ -75,7 +51,7 @@ class LumaDenoiserTest {
 
     @Test
     fun `zero strength is an exact no-op`() {
-        val rgb = image(16, 99L)
+        val rgb = TestImages.randomImage(16, 99L)
         val beforeR = rgb.r.copyOf()
         val beforeG = rgb.g.copyOf()
         val beforeB = rgb.b.copyOf()

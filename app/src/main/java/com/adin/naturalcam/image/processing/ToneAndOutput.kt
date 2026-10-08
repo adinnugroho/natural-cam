@@ -4,6 +4,8 @@ import com.adin.naturalcam.image.core.CpuParallel
 import com.adin.naturalcam.image.core.RgbGains
 import com.adin.naturalcam.image.core.RgbImage
 import com.adin.naturalcam.image.core.ToneConfig
+import com.adin.naturalcam.image.core.luminance
+import com.adin.naturalcam.image.core.srgbEncode
 import kotlin.math.pow
 
 private const val LUT_SIZE = 4096
@@ -60,10 +62,10 @@ object NaturalToneMapper {
         }
         CpuParallel.forEach(rgb.r.size) { start, end ->
             for (i in start until end) {
-                val luminance = linearLuminance(rgb.r[i], rgb.g[i], rgb.b[i])
-                if (luminance > 0f) {
-                    val mapped = if (luminance < 1f) sampleUnitLut(table, luminance) else tone(luminance, config)
-                    val scale = mapped / luminance
+                val luma = luminance(rgb.r[i], rgb.g[i], rgb.b[i])
+                if (luma > 0f) {
+                    val mapped = if (luma < 1f) sampleUnitLut(table, luma) else tone(luma, config)
+                    val scale = mapped / luma
                     rgb.r[i] *= scale
                     rgb.g[i] *= scale
                     rgb.b[i] *= scale
@@ -127,9 +129,6 @@ object HighlightRollOff {
         return start + span * t.pow(exponent)
     }
 }
-
-private fun linearLuminance(r: Float, g: Float, b: Float): Float =
-    0.2126f * r + 0.7152f * g + 0.0722f * b
 
 /** Clips linear channels into the sRGB gamut before encoding (MVP strategy). */
 
@@ -265,15 +264,6 @@ object ColorTransformStage {
  */
 object OutputTransformer {
 
-    private val srgbLut = FloatArray(LUT_SIZE + 1) { index ->
-        val clamped = index / LUT_SCALE
-        if (clamped <= 0.0031308f) {
-            12.92f * clamped
-        } else {
-            1.055f * clamped.pow(1f / 2.4f) - 0.055f
-        }
-    }
-
     fun toArgb8888(rgb: RgbImage): IntArray {
         val out = IntArray(rgb.r.size)
         CpuParallel.forEach(out.size) { start, end ->
@@ -290,6 +280,6 @@ object OutputTransformer {
     internal fun encodeChannel(x: Float): Int {
         if (!x.isFinite() || x <= 0f) return 0
         val clamped = if (x > 1f) 1f else x
-        return (sampleUnitLut(srgbLut, clamped) * 255f + 0.5f).toInt().coerceIn(0, 255)
+        return (srgbEncode(clamped) * 255f + 0.5f).toInt().coerceIn(0, 255)
     }
 }
