@@ -10,6 +10,7 @@ import com.adin.naturalcam.camera.CameraException
 import com.adin.naturalcam.camera.CapturedFrames
 import com.adin.naturalcam.camera.toCameraError
 import com.adin.naturalcam.domain.CameraError
+import com.adin.naturalcam.domain.CaptureSource
 import com.adin.naturalcam.domain.CaptureLimitation
 import com.adin.naturalcam.domain.CaptureMetadata
 import com.adin.naturalcam.domain.CapturePlan
@@ -138,7 +139,7 @@ class CaptureCoordinator(
             val captureMs = SystemClock.elapsedRealtime() - captureStart
 
             val previewJpeg = withContext(processingDispatcher) {
-                createQuickPreview(frames.halJpegBytes)
+                createQuickPreview(frames.halJpegBytes ?: frames.jpegBytes)
             }
             _captureState.value = CaptureState.Processing(null, previewJpeg)
             val processStart = SystemClock.elapsedRealtime()
@@ -223,11 +224,21 @@ class CaptureCoordinator(
                 PhotoCaptureResult(photo, null, metadata, request.profile, config.pipelineVersion, limitations)
             }
             else -> {
-                // Platform-processed fallback (or SYSTEM output): pass the bytes through
-                // with only honest metadata written (AGENTS 32).
+                // Speed-first NATURAL uses the processed JPEG as its base, then applies the
+                // selected style before saving. SYSTEM remains a direct platform passthrough.
                 val bytes = frames.halJpegBytes ?: frames.jpegBytes
                     ?: throw CameraException(CameraError.ProcessingFailed("no captured payload"))
-                val photo = saveFinalJpeg(bytes, metadata.timestampMs, jpegMetadata, request)
+                val processStart = SystemClock.elapsedRealtime()
+                val processed = if (
+                    request.profile == ProcessingProfile.NATURAL &&
+                    plan.source == CaptureSource.PROCESSED_JPEG
+                ) {
+                    pipeline.processJpeg(bytes, config, timings).bytes
+                } else {
+                    bytes
+                }
+                timings?.record("pipeline", SystemClock.elapsedRealtime() - processStart)
+                val photo = saveFinalJpeg(processed, metadata.timestampMs, jpegMetadata, request)
                 PhotoCaptureResult(photo, null, metadata, request.profile, config.pipelineVersion, limitations)
             }
         }

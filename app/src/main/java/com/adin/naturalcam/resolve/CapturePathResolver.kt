@@ -104,6 +104,18 @@ object CapturePathResolver {
         capabilities: CameraCapabilities,
         hdrBracketEnabled: Boolean,
     ): CapturePlan = when {
+        // Speed-first final-only NATURAL: the platform JPEG is the source, then the app's
+        // selected style is applied without waiting for RAW development.
+        !saveRaw && raw && jpeg -> CapturePlan(
+            source = CaptureSource.PROCESSED_JPEG,
+            pipeline = PipelineType.HARDWARE_PROCESSED,
+            saveRaw = false,
+            ispConfiguration = isp,
+            limitations = ispLimitations(isp) +
+                CaptureLimitation.FALLBACK_TO_JPEG +
+                CaptureLimitation.ISP_PROCESSING_UNCONTROLLABLE +
+                CaptureLimitation.PREVIEW_MAY_DIFFER,
+        )
         raw -> {
             val useHdrBracket = hdrBracketEnabled && capabilities.exposureCompensationUsable
             CapturePlan(

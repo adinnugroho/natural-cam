@@ -17,13 +17,12 @@ import org.junit.Test
 class CapturePathResolverTest {
 
     @Test
-    fun `natural prefers raw when available`() {
+    fun `natural final-only uses processed jpeg for instant styled output`() {
         val plan = CapturePathResolver.resolve(testCapabilities(raw = true), ProcessingProfile.NATURAL, RawMode.FINAL_ONLY)
-        assertEquals(CaptureSource.RAW_SENSOR, plan.source)
-        assertEquals(PipelineType.RAW_NATURAL, plan.pipeline)
+        assertEquals(CaptureSource.PROCESSED_JPEG, plan.source)
+        assertEquals(PipelineType.HARDWARE_PROCESSED, plan.pipeline)
         assertFalse(plan.saveRaw)
-        assertEquals(3, plan.rawFrameCount)
-        assertEquals(RawFrameStrategy.MFNR, plan.rawFrameStrategy)
+        assertTrue(CaptureLimitation.FALLBACK_TO_JPEG in plan.limitations)
     }
 
     @Test
@@ -31,7 +30,7 @@ class CapturePathResolverTest {
         val plan = CapturePathResolver.resolve(
             capabilities = testCapabilities(raw = true),
             profile = ProcessingProfile.NATURAL,
-            rawMode = RawMode.FINAL_ONLY,
+            rawMode = RawMode.RAW_AND_FINAL,
             hdrBracketEnabled = true,
         )
 
@@ -96,12 +95,12 @@ class CapturePathResolverTest {
     }
 
     @Test
-    fun `zoom at or above 1x keeps the raw plan unchanged`() {
+    fun `zoom at or above 1x keeps instant jpeg plan`() {
         val plan = CapturePathResolver.resolve(testCapabilities(raw = true), ProcessingProfile.NATURAL, RawMode.FINAL_ONLY, zoomRatio = 1f)
-        assertEquals(CaptureSource.RAW_SENSOR, plan.source)
+        assertEquals(CaptureSource.PROCESSED_JPEG, plan.source)
         assertFalse(CaptureLimitation.RAW_NOT_AVAILABLE in plan.limitations)
         val zoomedIn = CapturePathResolver.resolve(testCapabilities(raw = true), ProcessingProfile.NATURAL, RawMode.FINAL_ONLY, zoomRatio = 3f)
-        assertEquals(CaptureSource.RAW_SENSOR, zoomedIn.source)
+        assertEquals(CaptureSource.PROCESSED_JPEG, zoomedIn.source)
     }
 
     @Test

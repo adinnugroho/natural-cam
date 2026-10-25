@@ -441,6 +441,8 @@ class CameraXController(
      * develops. It is never the saved NATURAL final. RAW-only output remains RAW-only.
      */
     private fun wantedOutputFormat(plan: CapturePlan, request: PhotoCaptureRequest): Int = when {
+        plan.source == CaptureSource.PROCESSED_JPEG && !plan.saveRaw ->
+            ImageCapture.OUTPUT_FORMAT_JPEG
         plan.source == CaptureSource.RAW_SENSOR && wantsHalJpeg(request) ->
             ImageCapture.OUTPUT_FORMAT_RAW_JPEG
         plan.source == CaptureSource.RAW_SENSOR -> ImageCapture.OUTPUT_FORMAT_RAW

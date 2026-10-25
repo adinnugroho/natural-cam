@@ -124,6 +124,14 @@ class CaptureCoordinatorTest {
             processedYuv++
             return EncodedImage(ByteArray(4) { 2 }, yuv.width, yuv.height)
         }
+        override fun processJpeg(
+            jpeg: ByteArray,
+            config: ProcessingConfiguration,
+            timings: ProcessingTimings?,
+        ): EncodedImage {
+            failWith?.let { throw it }
+            return EncodedImage(jpeg, 4, 4)
+        }
     }
 
     private class FakeMediaStore : MediaStoreWriter {

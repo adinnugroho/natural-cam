@@ -1,5 +1,7 @@
 package com.adin.naturalcam.image.core
 
+import android.graphics.BitmapFactory
+
 import com.adin.naturalcam.BuildConfig
 import com.adin.naturalcam.domain.ProcessingProfile
 import com.adin.naturalcam.image.processing.AspectCropper
@@ -24,6 +26,7 @@ import com.adin.naturalcam.image.raw.LensShadingCorrector
 import com.adin.naturalcam.image.raw.GlesRawPurePipeline
 import com.adin.naturalcam.image.raw.RawNormalizer
 import com.adin.naturalcam.image.style.StyleEngine
+import com.adin.naturalcam.image.style.FastJpegStyleProcessor
 import com.adin.naturalcam.image.yuv.YuvToRgbConverter
 import java.util.Locale
 
@@ -48,6 +51,12 @@ interface ImagePipeline {
         orientationDegrees: Int,
         timings: ProcessingTimings? = null,
     ): EncodedImage
+    /** Fast processed-JPEG path used when NATURAL prioritizes shutter-to-gallery latency. */
+    fun processJpeg(
+        jpeg: ByteArray,
+        config: ProcessingConfiguration,
+        timings: ProcessingTimings? = null,
+    ): EncodedImage
 }
 
 /**
@@ -64,6 +73,34 @@ interface ImagePipeline {
 class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
 
     override val version: String = ProcessingConfiguration.PIPELINE_VERSION
+    override fun processJpeg(
+        jpeg: ByteArray,
+        config: ProcessingConfiguration,
+        timings: ProcessingTimings?,
+    ): EncodedImage {
+        val bitmap = timings.measureStage("jpegDecode") {
+            BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size)
+                ?: throw IllegalArgumentException("processed JPEG decode failed")
+        }
+        val width = bitmap.width
+        val height = bitmap.height
+        val argb = IntArray(width * height)
+        timings.measureStage("jpegPixels") { bitmap.getPixels(argb, 0, width, 0, 0, width, height) }
+        bitmap.recycle()
+
+        timings.measureStage("style") {
+            FastJpegStyleProcessor.apply(argb, width, height, config.style)
+        }
+        timings.measureStage("grain") {
+            GrainStage.apply(argb, width, height, config.style.grain)
+        }
+        val cropped = timings.measureStage("crop") {
+            AspectCropper.crop(argb, width, height, config.outputAspect)
+        }
+        return timings.measureStage("encode") {
+            encoder.encode(cropped.argb, cropped.width, cropped.height, config.jpegQuality)
+        }
+    }
 
     override fun processRaw(
         raw: RawImage,
