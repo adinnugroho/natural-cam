@@ -292,6 +292,9 @@ class CameraViewModel(
 
 
     override fun onSetAspectRatio(aspectRatio: AspectRatio) {
+        // Publish before DataStore and camera rebind suspensions so the next shutter
+        // request cannot capture with the previous ratio.
+        _uiState.update { it.copy(aspectRatio = aspectRatio) }
         viewModelScope.launch {
             settingsRepository.setAspectRatio(aspectRatio)
             controller.setAspectRatio(aspectRatio)

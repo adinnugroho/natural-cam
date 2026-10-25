@@ -32,8 +32,8 @@ class PipelineAndYuvTest {
         timestampMs = 0,
     )
 
-    private fun rawImage(cfa: CfaLayout, size: Int = 8, value: Int = 512): RawImage =
-        RawImage(size, size, ShortArray(size * size) { value.toShort() }, rawMeta(cfa))
+    private fun rawImage(cfa: CfaLayout, width: Int = 8, height: Int = 6, value: Int = 512): RawImage =
+        RawImage(width, height, ShortArray(width * height) { value.toShort() }, rawMeta(cfa))
 
     // ---- YUV ----
 
@@ -99,7 +99,7 @@ class PipelineAndYuvTest {
         for (layout in CfaLayout.entries) {
             val encoded = pipeline.processRaw(rawImage(layout), ProcessingConfiguration.forProfile(ProcessingProfile.NATURAL))
             assertEquals(8, encoded.width)
-            assertEquals(8, encoded.height)
+            assertEquals(6, encoded.height)
         }
         assertEquals(CfaLayout.entries.size, encoder.calls)
     }
@@ -109,7 +109,7 @@ class PipelineAndYuvTest {
         val encoder = RecordingEncoder()
         val pipeline = DefaultImagePipeline(encoder)
         // Gradient-ish input so tone mapping has something to move.
-        val raw = RawImage(8, 8, ShortArray(64) { (it * 16).toShort() }, rawMeta(CfaLayout.RGGB))
+        val raw = RawImage(8, 6, ShortArray(48) { (it * 16).toShort() }, rawMeta(CfaLayout.RGGB))
         val natural = pipeline.processRaw(raw, ProcessingConfiguration.forProfile(ProcessingProfile.NATURAL))
         val pure = pipeline.processRaw(raw, ProcessingConfiguration.forProfile(ProcessingProfile.PURE))
         // Both complete with the requested geometry; the stub encoder proves
@@ -134,47 +134,54 @@ class PipelineAndYuvTest {
         val encoder = RecordingEncoder()
         val pipeline = DefaultImagePipeline(encoder)
         val yuv = YuvImage(
-            width = 4, height = 4,
-            yPlane = ByteArray(16) { 100.toByte() }, yRowStride = 4, yPixelStride = 1,
-            uPlane = ByteArray(4) { 128.toByte() }, uRowStride = 2, uPixelStride = 1,
-            vPlane = ByteArray(4) { 128.toByte() }, vRowStride = 2, vPixelStride = 1,
+            width = 8, height = 6,
+            yPlane = ByteArray(48) { 100.toByte() }, yRowStride = 8, yPixelStride = 1,
+            uPlane = ByteArray(12) { 128.toByte() }, uRowStride = 4, uPixelStride = 1,
+            vPlane = ByteArray(12) { 128.toByte() }, vRowStride = 4, vPixelStride = 1,
         )
         val encoded = pipeline.processYuv(yuv, ProcessingConfiguration.forProfile(ProcessingProfile.NATURAL), 0)
-        assertEquals(4, encoded.width)
-        assertEquals(4, encoded.height)
+        assertEquals(8, encoded.width)
+        assertEquals(6, encoded.height)
         assertEquals(92, encoder.lastQuality)
     }
 
     @Test
     fun `pipeline version is stable for regression tracking`() {
-        assertEquals("natural-v38", ProcessingConfiguration.forProfile(ProcessingProfile.NATURAL).pipelineVersion)
+        assertEquals("natural-v42", ProcessingConfiguration.forProfile(ProcessingProfile.NATURAL).pipelineVersion)
         assertEquals("pure-v2", ProcessingConfiguration.forProfile(ProcessingProfile.PURE).pipelineVersion)
         assertEquals(ProcessingConfiguration.PIPELINE_VERSION, DefaultImagePipeline(RecordingEncoder()).version)
     }
 
     @Test
-    fun `natural recipe carries its own exposure lift`() {
-        // The NATURAL look includes a fixed pipeline lift, independent of the
-        // camera EV control. PURE and SYSTEM must never inherit it.
-        assertEquals(0.75f, ProcessingConfiguration.forProfile(ProcessingProfile.NATURAL).tone.exposureStops, 0f)
+    fun `natural recipe keeps the raw level but adds separation`() {
+        // NATURAL adds contrast around the RAW development's own level and a shoulder:
+        // no exposure lift, a restrained sub-pivot toe (the fix for the haziness a
+        // straight development leaves), a small lift above the pivot and the highlight
+        // protection. PURE and SYSTEM carry none of the tone moves.
+        val natural = ProcessingConfiguration.forProfile(ProcessingProfile.NATURAL).tone
+        assertEquals(0f, natural.exposureStops, 0f)
+        assertTrue("a toe is what removes the veil", natural.midtoneGamma > 1f)
+        assertTrue("contrast above the pivot finishes the image", natural.contrast > 0f)
+        assertTrue("the shoulder is what protects the top end", natural.highlightCompression > 0f)
         assertEquals(0f, ProcessingConfiguration.forProfile(ProcessingProfile.PURE).tone.exposureStops, 0f)
         assertEquals(0f, ProcessingConfiguration.forProfile(ProcessingProfile.SYSTEM).tone.exposureStops, 0f)
     }
 
     @Test
     fun `bloom style adds a visible halo around highlights in the encoded image`() {
-        val size = 128
+        val width = 128
+        val height = 96
         fun render(bloom: Float): IntArray {
             val encoder = RecordingEncoder()
             val pipeline = DefaultImagePipeline(encoder)
             pipeline.processYuv(
-                scene(size),
+                scene(width, height),
                 ProcessingConfiguration.forProfile(ProcessingProfile.NATURAL, style = StyleState(bloom = bloom)),
                 0,
             )
             return encoder.argb
         }
-        fun red(argb: IntArray, x: Int) = (argb[64 * size + x] shr 16) and 0xFF
+        fun red(argb: IntArray, x: Int) = (argb[64 * width + x] shr 16) and 0xFF
 
         val off = render(0f)
         val on = render(1f)
@@ -191,12 +198,13 @@ class PipelineAndYuvTest {
 
     @Test
     fun `grain adds luma texture without adding chroma noise`() {
-        val size = 96
+        val width = 96
+        val height = 72
 
         fun render(grain: Float, strength: Float = 1f): IntArray {
             val encoder = RecordingEncoder()
             DefaultImagePipeline(encoder).processYuv(
-                coloredNoiseScene(size),
+                coloredNoiseScene(width, height),
                 ProcessingConfiguration.forProfile(
                     ProcessingProfile.NATURAL,
                     style = StyleState(grain = grain, strength = strength),
@@ -250,14 +258,14 @@ class PipelineAndYuvTest {
         val on = channels(render(1f))
 
         fun hf(channel: (Triple<FloatArray, FloatArray, FloatArray>) -> FloatArray): Float =
-            rms(highPass(channel(on), size, size))
+            rms(highPass(channel(on), width, height))
 
-        val lumaOff = rms(highPass(off.first, size, size))
-        val lumaOn = rms(highPass(on.first, size, size))
-        val rgOff = rms(highPass(off.second, size, size))
-        val rgOn = rms(highPass(on.second, size, size))
-        val bgOff = rms(highPass(off.third, size, size))
-        val bgOn = rms(highPass(on.third, size, size))
+        val lumaOff = rms(highPass(off.first, width, height))
+        val lumaOn = rms(highPass(on.first, width, height))
+        val rgOff = rms(highPass(off.second, width, height))
+        val rgOn = rms(highPass(on.second, width, height))
+        val bgOff = rms(highPass(off.third, width, height))
+        val bgOn = rms(highPass(on.third, width, height))
         val lumaAdded = lumaOn - lumaOff
         val chromaAdded = maxOf(rgOn - rgOff, bgOn - bgOff)
 
@@ -275,17 +283,17 @@ class PipelineAndYuvTest {
         val zeroStrength = channels(render(1f, strength = 0f))
         assertTrue(
             "grain must survive style strength 0",
-            rms(highPass(zeroStrength.first, size, size)) > 1.05f * lumaOff,
+            rms(highPass(zeroStrength.first, width, height)) > 1.05f * lumaOff,
         )
     }
 
-    private fun coloredNoiseScene(size: Int): YuvImage {
+    private fun coloredNoiseScene(width: Int, height: Int): YuvImage {
         // Constant luma with noisy chroma: the base image carries almost no luma
         // texture, so any luma HF growth in the render comes from the grain, while
         // the noisy chroma is there to catch grain that leaks into colour.
-        val y = ByteArray(size * size) { 130.toByte() }
-        val u = ByteArray(size * size / 4)
-        val v = ByteArray(size * size / 4)
+        val y = ByteArray(width * height) { 130.toByte() }
+        val u = ByteArray(width * height / 4)
+        val v = ByteArray(width * height / 4)
         var seed = 987654321L
         fun next(): Int {
             seed = (seed * 1103515245 + 12345) and 0x7FFFFFFF
@@ -296,21 +304,21 @@ class PipelineAndYuvTest {
             v[i] = (142 + next() % 13).toByte()
         }
         return YuvImage(
-            width = size, height = size,
-            yPlane = y, yRowStride = size, yPixelStride = 1,
-            uPlane = u, uRowStride = size / 2, uPixelStride = 1,
-            vPlane = v, vRowStride = size / 2, vPixelStride = 1,
+            width = width, height = height,
+            yPlane = y, yRowStride = width, yPixelStride = 1,
+            uPlane = u, uRowStride = width / 2, uPixelStride = 1,
+            vPlane = v, vRowStride = width / 2, vPixelStride = 1,
         )
     }
 
-    private fun scene(size: Int): YuvImage {
-        val y = ByteArray(size * size) { 60.toByte() }
-        for (yy in 56 until 72) for (xx in 56 until 72) y[yy * size + xx] = 235.toByte()
+    private fun scene(width: Int, height: Int): YuvImage {
+        val y = ByteArray(width * height) { 60.toByte() }
+        for (yy in 56 until 72) for (xx in 56 until 72) y[yy * width + xx] = 235.toByte()
         return YuvImage(
-            width = size, height = size,
-            yPlane = y, yRowStride = size, yPixelStride = 1,
-            uPlane = ByteArray(size * size / 4) { 128.toByte() }, uRowStride = size / 2, uPixelStride = 1,
-            vPlane = ByteArray(size * size / 4) { 128.toByte() }, vRowStride = size / 2, vPixelStride = 1,
+            width = width, height = height,
+            yPlane = y, yRowStride = width, yPixelStride = 1,
+            uPlane = ByteArray(width * height / 4) { 128.toByte() }, uRowStride = width / 2, uPixelStride = 1,
+            vPlane = ByteArray(width * height / 4) { 128.toByte() }, vRowStride = width / 2, vPixelStride = 1,
         )
     }
 }

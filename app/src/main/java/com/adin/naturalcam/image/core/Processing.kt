@@ -106,31 +106,52 @@ internal fun naturalWarmth(tone: ToneConfig): Float =
  */
 data class ToneConfig(
     /**
-     * NATURAL recipe exposure lift in stops, applied in linear light inside the
-     * pipeline. This is a fixed part of the NATURAL look, independent of the
-     * camera EV control the user drives from the shutter bar.
-     *
-     * Was 1.5, which had no headroom: on a real frame it put 1.30% of pixels
-     * within 15 levels of white (against 0.02% for a plain development) and the
-     * 99th percentile at 243/255, while squeezing the blacks out. A highlight
-     * shoulder cannot recover that — measured, raising it moved near-white from
-     * 1.30% to only 1.26%. Halving the lift spread the range and cut near-white
-     * to 0.03% while staying brighter than no lift at all.
+     * NATURAL recipe exposure in stops. **Zero**: the delivered level is the RAW
+     * development's own, so the black point, midtone level and highlight headroom
+     * are the sensor's, not a recipe's. The recipe's brightness came from a fixed
+     * lift (+0.75 EV at v36-v38) that had to be fought back down by a deepening
+     * shadow toe — two tone moves pushing against each other, and still ~30%
+     * brighter than a plain development with 12% of a bright frame's pixels
+     * compressed by the shoulder instead of left where the sensor put them.
+     * Measured on two device DNGs (bright outdoor, dim indoor) with the lift and
+     * the toe removed: black point p05 18.3 -> 18.4 / 8.9 -> 9.0, p1 19.6 -> 19.7 /
+     * 10.8 -> 10.8, median 104.1 -> 104.5 / 42.4 -> 42.5, p95 255 -> 250.3 / 103.7 ->
+     * 104.1 — i.e. the RAW development itself, with only the shoulder acting on the
+     * top end so clipped highlights stop being flat white. The toe and the small
+     * contrast above the pivot (below) then add separation *around* that level.
      */
-    val exposureStops: Float = 0.75f,
+    val exposureStops: Float = 0f,
     /**
-     * Sub-pivot tone exponent: everything below mid-gray is raised to this power.
-     * Above 1 it deepens the shadows, which is what puts real blacks back after the
-     * exposure lift. At 1.04 the near-blacks sat at 0.83% of pixels against 1.97%
-     * for a plain development; 1.20 matches that (2.22%) while keeping the frame
-     * ~22% brighter overall, and the highlight end is untouched (p95 unchanged).
+     * Sub-pivot tone exponent. A restrained toe: below mid-gray the frame is
+     * deepened away from the veil a straight RAW development leaves (a linear
+     * negative with no base curve reads as haze — the "fade" users report), while
+     * the pivot is a touch under mid-gray and the value at 0 stays 0, so the black
+     * point is only *deepened*, never lifted.
+     *
+     * Measured on three device DNGs against the v40 curve (delivered levels/255):
+     * bright outdoor p0.5 14.2 -> 12.7, p5 25.5 -> 23.8, p10 32.5 -> 30.8,
+     * median 103.3 -> 102.8, p75 168.7 -> 169.3; bright indoor p0.5 26.5 -> 24.8,
+     * p5 42.5 -> 40.8, median 127.4 -> 127.5; dusk street p0.5 3.1 -> 2.6,
+     * p5 9.4 -> 8.1, median 30.2 -> 28.5. The upper half gets the matching
+     * small lift; the highlight shoulder stays in place, so bright-frame p95
+     * remains 250.3 and clipping remains 0.10% instead of returning to the RAW-like
+     * 12.57% hard-clipped pixels.
      */
-    val midtoneGamma: Float = 1.20f,
-    /** Slightly stronger global contrast keeps the lifted image from looking faded. */
-    val contrast: Float = 0.05f,
+    val midtoneGamma: Float = 1.14f,
+    /**
+     * Contrast above the mid-gray pivot. **0.06**: the upper mids gain a little
+     * more separation while the existing shoulder keeps specular highlights smooth.
+     */
+    val contrast: Float = 0.06f,
     /** Linear level where highlight shoulder starts. */
     val highlightRollOffStart: Float = 0.75f,
-    /** Minimal shoulder preserves highlight contrast without a washed/faded look. */
+    /**
+     * Minimal shoulder. The restrained curve lifts upper mids, then this shoulder
+     * keeps specular highlights smooth: on a bright frame the plain development
+     * hard-clips 12.15% of pixels to 255, while NATURAL lands at p95 250.3 with
+     * 0.10% clipped. RAW-like hard clipping remains an explicit tradeoff, not the
+     * NATURAL default.
+     */
     val highlightCompression: Float = 0.03f,
     /**
      * NATURAL's own red/blue balance toward warmth, independent of the user's
@@ -151,9 +172,10 @@ data class ProcessingConfiguration(
     /**
      * Aspect ratio of the delivered image. Geometry only — the crop keeps pixels of the
      * same rendering untouched — so it is not part of the processing recipe and does not
-     * affect [pipelineVersion]. [domain.AspectRatio.RATIO_FULL] means "the sensor's frame".
+     * affect [pipelineVersion]. The default 4:3 value is the full sensor frame on
+     * the supported 4:3 sensors.
      */
-    val outputAspect: AspectRatio = AspectRatio.RATIO_FULL,
+    val outputAspect: AspectRatio = AspectRatio.RATIO_4_3,
     /**
      * Strength of the 2x2 block chroma pass of `NoiseReducer` (the `reduce`
      * stage). 0 for every built-in profile — NATURAL cleans chroma with
@@ -176,14 +198,14 @@ data class ProcessingConfiguration(
     val jpegQuality: Int = 92,
 ) {
     companion object {
-        const val PIPELINE_VERSION = "natural-v38"
+        const val PIPELINE_VERSION = "natural-v42"
 
         fun forProfile(
             profile: ProcessingProfile,
             jpegQuality: Int = 92,
             temperature: Float = 0f,
             style: StyleState = StyleState(),
-            aspectRatio: AspectRatio = AspectRatio.RATIO_FULL,
+            aspectRatio: AspectRatio = AspectRatio.RATIO_4_3,
         ): ProcessingConfiguration =
             when (profile) {
                 ProcessingProfile.NATURAL -> ProcessingConfiguration(

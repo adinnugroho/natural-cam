@@ -21,6 +21,9 @@ data class LensChoice(
     val selected: Boolean,
 )
 
+/** A selected picker entry is already active and must not freeze the live preview. */
+internal fun lensSwitchNeedsFreeze(choice: LensChoice): Boolean = !choice.selected
+
 /** "0.5×" → "0.5X": the compact lens row has no room for the multiplication sign. */
 internal fun String.asLensLabel(): String = replace("×", "X").uppercase()
 

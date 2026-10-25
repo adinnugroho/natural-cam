@@ -228,17 +228,15 @@ scales, noise included, so it pays a second chroma-only denoise pass on a shifte
 2x2 grid - inside the chroma resolution the JPEG output discards anyway - and the
 saved colour gets stronger without the colour noise growing with it.
 
-`Grain` is dynamic rather than a fixed overlay: its amplitude follows a midtone
-bell and fades out where the image already carries local detail or edges, so the
-grain reads as texture in smooth areas instead of being stamped over everything.
-Its structure is pixel-scale — one lattice octave near 1.6 px interpolated linearly
-(no smoothing, which reads as blur) over per-pixel speckle — with the amplitude only
-gently nudged by a small patch field and, where the grain has to survive 8-bit
-rounding, a dithered shift rather than a plain one.
-It is also applied to the *delivered* pixels — after tone, gamut, and the output
-transfer curve — rather than inside the linear working space, because only there
-can every channel take the same shift and leave the image's colour exactly
-untouched.
+`Grain` is restrained monochrome luminance noise, not a texture mask. Its amplitude
+follows encoded luma and a midtone bell, but it no longer uses lattice clumps,
+large density patches, or image-detail suppression; those spatial rules made the
+result visibly synthetic. Two decorrelated hash samples form a bounded triangular
+field, keeping the texture pixel-scale while softening the flat-random look.
+At amount 1 the peak is roughly ±10 encoded levels in a midtone, instead of the
+previous ±41-level ceiling. It is applied to the delivered pixels — after tone,
+gamut, and the output transfer curve — so one bounded integer shift can be shared
+by all channels and leave the image's colour exactly untouched.
 
 The style chain also starts with a light denoise scaled by `Strength` (chroma
 stronger than luminance), so the styled result is a little cleaner before tone and

@@ -144,7 +144,7 @@ class CaptureCoordinatorTest {
             return SavedPhoto("content://test/$fileName", fileName, 4, 4, "image/jpeg")
         }
 
-        override suspend fun saveDng(bytes: ByteArray, fileName: String, metadata: CaptureMetadata): SavedPhoto? {
+        override suspend fun saveDng(file: File, fileName: String, metadata: CaptureMetadata): SavedPhoto? {
             saveGate?.await()
             if (fail) return null
             savedDngs += fileName

@@ -67,12 +67,17 @@ class ToneAndFilterTest {
     }
 
     @Test
-    fun `natural tone keeps black and deepens shadows`() {
+    fun `natural tone recipe separates the ends without lifting black`() {
         val config = ToneConfig()
         val exponent = config.midtoneGamma * (1f + config.contrast)
-
+        // Anchored at the pivot with an exponent above 1 on both sides: the shadows
+        // deepen and the upper half lifts, which is a contrast curve, not a lift —
+        // the "fade" a plain development leaves comes from having neither.
         assertEquals(0f, NaturalToneMapper.tone(0f, exponent), 0f)
         assertTrue(NaturalToneMapper.tone(0.1f, exponent) < 0.1f)
+        assertTrue(NaturalToneMapper.tone(0.9f, exponent) > 0.9f)
+        // Monotone through the pivot seam, so nothing inverts at 0.18.
+        assertTrue(NaturalToneMapper.tone(0.18f, exponent) >= NaturalToneMapper.tone(0.179f, exponent))
     }
 
     @Test
@@ -232,7 +237,7 @@ class ToneAndFilterTest {
             // colour, are untouched by construction.
             assertEquals(dr, green(argb[i]) - green(before[i]))
             assertEquals(dr, blue(argb[i]) - blue(before[i]))
-            assertTrue("grain exceeded its bound at $i: $dr", kotlin.math.abs(dr) <= 36)
+            assertTrue("grain exceeded its bound at $i: $dr", kotlin.math.abs(dr) <= 12)
             if (dr != 0) changed = true
         }
         assertTrue("grain must change pixels", changed)
@@ -268,7 +273,7 @@ class ToneAndFilterTest {
     }
 
     @Test
-    fun `grain is fine-grained, crisp, and varies in density across the frame`() {
+    fun `grain is pixel-scale, centered, and not spatially clumped`() {
         val size = 256
         val level = 77
         val argb = grayArgb(size, level)
@@ -279,8 +284,6 @@ class ToneAndFilterTest {
         val sigma = kotlin.math.sqrt(offsets.sumOf { (it * it).toDouble() } / offsets.size).toFloat()
         assertTrue("grain must have amplitude", sigma > 1f)
 
-        // Grain size: the field decorrelates within a pixel. Blurred, multi-pixel clumps
-        // sat at ~0.75 correlation at lag 1 and were exactly what read as blur.
         var cross = 0.0
         var count = 0
         for (y in 0 until size) {
@@ -290,10 +293,8 @@ class ToneAndFilterTest {
             }
         }
         val lagOne = (cross / count / (sigma * sigma)).toFloat()
-        assertTrue("grain is too coarse/blurred: lag-1 correlation $lagOne", lagOne < 0.5f)
+        assertTrue("grain is spatially clumped: lag-1 correlation $lagOne", lagOne < 0.25f)
 
-        // Crispness: neighbouring differences are large relative to the amplitude
-        // (white noise sits at 1.13; blurred clumps fall well below 1).
         var stepSum = 0.0
         for (y in 0 until size) {
             for (x in 0 until size - 1) {
@@ -302,40 +303,20 @@ class ToneAndFilterTest {
         }
         val meanStep = (stepSum / (size * (size - 1))).toFloat()
         val ratio = meanStep / sigma
-        assertTrue("grain is too soft: step ratio $ratio", ratio > 0.9f && ratio < 1.25f)
+        assertTrue("grain is too soft: step ratio $ratio", ratio > 0.9f && ratio < 1.35f)
 
-        // Density modulation: 64×64 blocks must not all carry exactly the same amplitude.
-        val blockSigmas = ArrayList<Float>()
-        for (by in 0 until 4) {
-            for (bx in 0 until 4) {
-                var sum = 0.0
-                for (y in by * 64 until by * 64 + 64) {
-                    for (x in bx * 64 until bx * 64 + 64) {
-                        val d = offsets[y * size + x].toDouble()
-                        sum += d * d
-                    }
-                }
-                blockSigmas.add(kotlin.math.sqrt(sum / (64 * 64)).toFloat())
-            }
-        }
-        val min = blockSigmas.min()
-        val max = blockSigmas.max()
-        assertTrue("grain density is uniform: $min..$max", max > 1.05f * min)
-
-        // Dithered rounding: the offset distribution stays centred, so small amounts do
-        // not turn into a one-sided salt pattern.
         val mean = offsets.sumOf { it.toDouble() } / offsets.size
         assertTrue("grain is biased: mean $mean", kotlin.math.abs(mean) < 0.2f * sigma)
     }
 
     @Test
-    fun `grain backs off where the image already has detail`() {
+    fun `grain remains present over image detail`() {
         val size = 128
         val argb = IntArray(size * size)
         for (y in 0 until size) {
             for (x in 0 until size) {
-                // Smooth top half, one-pixel checkerboard bottom half: same mean level,
-                // so only the local detail differs.
+                // Smooth top half and a one-pixel checkerboard bottom half.
+                // Grain should not switch off just because the image has detail.
                 val value = if (y < size / 2) {
                     120
                 } else if ((x + y) % 2 == 0) {
@@ -363,14 +344,13 @@ class ToneAndFilterTest {
             }
             return kotlin.math.sqrt(sum / count).toFloat()
         }
-        // 4 px of margin so the bilinear mask cannot bleed across the seam.
-        val smooth = grainSigma(0, size / 2 - 4)
-        val detailed = grainSigma(size / 2 + 4, size)
-        assertTrue(
-            "grain must back off in detailed regions: smooth $smooth detailed $detailed",
-            smooth > 1.8f * detailed,
-        )
+
+        val smooth = grainSigma(0, size / 2)
+        val detailed = grainSigma(size / 2, size)
+        assertTrue("smooth region lost its grain", smooth > 0.5f)
+        assertTrue("grain is too weak over detail: $smooth vs $detailed", detailed > smooth / 1.5f)
     }
+
 
     @Test
     fun `grain is weighted to midtones and keeps deep shadows clean`() {
@@ -390,8 +370,8 @@ class ToneAndFilterTest {
 
         val shadowSpread = spread(shadow, shadowBefore)
         val midtoneSpread = spread(midtone, midtoneBefore)
-        assertTrue("grain must be visible in midtones", midtoneSpread > 20)
-        assertTrue("shadow grain must stay far below midtone grain", shadowSpread < midtoneSpread / 4)
+        assertTrue("grain must be visible in midtones", midtoneSpread > 8)
+        assertTrue("shadow grain must stay far below midtone grain", shadowSpread < midtoneSpread / 3)
     }
 
     @Test

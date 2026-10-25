@@ -243,7 +243,7 @@ class CaptureCoordinator(
 
         // RAW survives even if later processing fails (SPEC 105): save first.
         val rawPhoto = if (plan.saveRaw) {
-            mediaStore.saveDng(dngFile.readBytes(), FileNaming.dngName(nameTimestamp), metadata)
+            mediaStore.saveDng(dngFile, FileNaming.dngName(nameTimestamp), metadata)
                 ?: throw CameraException(CameraError.StorageFailed("MediaStore rejected the DNG write"))
         } else {
             null

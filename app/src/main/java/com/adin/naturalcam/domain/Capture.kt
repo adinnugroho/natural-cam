@@ -99,7 +99,7 @@ data class PhotoCaptureRequest(
     val focusMode: FocusMode,
     val flashMode: FlashMode,
     /** Delivered aspect ratio; the develop crops to it (SPEC 66 framing must not surprise). */
-    val aspectRatio: AspectRatio = AspectRatio.RATIO_FULL,
+    val aspectRatio: AspectRatio = AspectRatio.RATIO_4_3,
     /**
      * Zoom the framing is composed with. Below 1x a *wider* physical camera is engaged behind
      * the logical camera, and RAW is not exposed for it, so the capture plan must not use RAW

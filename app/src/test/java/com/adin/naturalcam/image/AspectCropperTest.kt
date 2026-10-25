@@ -13,8 +13,8 @@ import org.junit.Test
 
 /**
  * The selected aspect ratio has to reach the delivered pixels. Found on device
- * (2026-10-08): 16:9 and Full both produced a 4:3 image in NATURAL because the RAW
- * develop had no crop stage, while the platform JPEG path did honour the setting.
+ * (2026-10-08): 16:9 produced a 4:3 NATURAL image because the RAW develop had no
+ * crop stage, while the platform JPEG path did honour the setting.
  */
 class AspectCropperTest {
 
@@ -32,10 +32,13 @@ class AspectCropperTest {
     }
 
     @Test
-    fun `full and already matching frames are returned untouched`() {
-        val argb = IntArray(12 * 9)
-        assertSame(argb, AspectCropper.crop(argb, 12, 9, AspectRatio.RATIO_FULL).argb)
-        assertSame(argb, AspectCropper.crop(argb, 12, 9, AspectRatio.RATIO_4_3).argb)
+    fun `four by three keeps matching sensor frames and crops wider frames`() {
+        val sensor = IntArray(12 * 9)
+        assertSame(sensor, AspectCropper.crop(sensor, 12, 9, AspectRatio.RATIO_4_3).argb)
+
+        val wider = AspectCropper.crop(IntArray(16 * 9), 16, 9, AspectRatio.RATIO_4_3)
+        assertEquals(12, wider.width)
+        assertEquals(9, wider.height)
     }
 
     @Test
