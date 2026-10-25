@@ -70,12 +70,15 @@ class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
         config: ProcessingConfiguration,
         timings: ProcessingTimings?,
     ): EncodedImage {
-        if (config.profile == ProcessingProfile.PURE && BuildConfig.EXPERIMENTAL_GPU_PIPELINE) {
+        if (
+            (config.profile == ProcessingProfile.PURE || config.profile == ProcessingProfile.NATURAL) &&
+            BuildConfig.EXPERIMENTAL_GPU_PIPELINE
+        ) {
             val gpu = timings.measureStage("gpuPipeline") {
-                GlesRawPurePipeline.tryRender(raw)
+                GlesRawPurePipeline.tryRender(raw, config)
             }
             if (gpu != null) {
-                timings?.fact("gpuPipelineBackend", "gles3-pure")
+                timings?.fact("gpuPipelineBackend", "gles3-${config.profile.name.lowercase()}")
                 val rotated = timings.measureStage("rotate") {
                     ImageRotation.rotate(gpu.argb, gpu.width, gpu.height, raw.metadata.orientationDegrees)
                 }

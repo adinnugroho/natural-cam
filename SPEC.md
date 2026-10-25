@@ -3323,13 +3323,16 @@ fallback is reported as a limitation.
 The internal GPU renderer is opt-in during validation:
 
 * Gradle property `gpuPipelineExperimental=true` enables it in debug builds;
-* the current end-to-end contract is PURE RAW with AsShotNeutral and a valid camera matrix;
+* PURE RAW is the validated end-to-end contract; style-neutral NATURAL has an experimental
+  implementation and falls back when style pads, Bloom, Grain, or Saturation are non-zero;
 * RAW normalization, lens shading, demosaic, calibration, residual WB reduction, clipped-highlight
-  neutralization, gamut clamp, and sRGB output remain GPU-resident until the final 8-bit readback;
+  neutralization, NATURAL tone, local denoise/sharpen, gamut clamp, and sRGB output remain
+  GPU-resident until the final 8-bit readback when that experimental path is eligible;
 * CPU JPEG encoding, physical rotation, and aspect crop remain unchanged;
-* NATURAL remains on the CPU reference until its adaptive denoise and style stages have equivalent
-  GPU implementations;
-* the default build keeps the CPU reference path.
+* NATURAL Style workspace states fall back to the CPU reference until equivalent bloom, grain,
+  palette, and saturation shaders exist;
+* the default build keeps the CPU reference path; device A/B validation of eligible NATURAL
+  output remains pending.
 
 ---
 

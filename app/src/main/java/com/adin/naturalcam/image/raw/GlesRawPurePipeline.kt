@@ -12,19 +12,25 @@ import com.adin.naturalcam.image.core.CfaLayout
 import com.adin.naturalcam.image.core.RawImage
 import com.adin.naturalcam.image.core.RgbGains
 import com.adin.naturalcam.image.core.RgbImage
+import com.adin.naturalcam.image.core.STYLE_CHROMA_DENOISE_STRENGTH
+import com.adin.naturalcam.image.core.ProcessingConfiguration
+import com.adin.naturalcam.image.core.naturalWarmth
 import com.adin.naturalcam.image.processing.WhiteBalanceStage
+import com.adin.naturalcam.domain.ProcessingProfile
+import com.adin.naturalcam.domain.StylePoint
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.pow
 import java.util.concurrent.Executors
 
 /**
- * Experimental end-to-end GPU path for PURE only.
+ * Experimental end-to-end GPU path for PURE and style-neutral NATURAL.
  *
  * The RAW mosaic stays in GPU textures through normalization, lens shading, demosaic, metadata
- * white balance, camera calibration, residual WB, clipped-highlight neutralization, gamut clamp,
- * and sRGB output. Only a 32x32 WB reduction and the final 8-bit frame cross the GPU boundary.
- * NATURAL remains on the CPU reference until its adaptive denoise/style chain has equivalent GPU
- * stages. Enable with `-PgpuPipelineExperimental=true`; the default is false.
+ * white balance, camera calibration, residual WB, clipped-highlight neutralization, NATURAL tone,
+ * local denoise/sharpen, gamut clamp, and sRGB output. Only a 32x32 WB reduction and the final
+ * 8-bit frame cross the GPU boundary. Style workspace states fall back to the CPU reference.
+ * Enable with `-PgpuPipelineExperimental=true`; the default is false.
  */
 internal object GlesRawPurePipeline {
     private const val TAG = "GlesRawPurePipeline"
@@ -39,10 +45,36 @@ internal object GlesRawPurePipeline {
 
     data class Result(val argb: IntArray, val width: Int, val height: Int)
 
-    fun tryRender(raw: RawImage): Result? {
-        val neutral = raw.metadata.asShotNeutral ?: return null
-        val matrix = runCatching { ColorMatrixFactory.cameraToWorkingRgbMatrix(raw.metadata) }.getOrNull()
-            ?: return null
+    fun tryRender(raw: RawImage, config: ProcessingConfiguration): Result? {
+        if (config.profile != ProcessingProfile.PURE && config.profile != ProcessingProfile.NATURAL) return null
+        if (config.profile == ProcessingProfile.NATURAL) {
+            val style = config.style
+            if (
+                style.tone != StylePoint.NEUTRAL ||
+                style.color != StylePoint.NEUTRAL ||
+                style.palette != StylePoint.NEUTRAL ||
+                style.bloom != 0f ||
+                style.grain != 0f ||
+                style.saturation != 0f
+            ) {
+                Log.i(
+                    TAG,
+                    "NATURAL GPU skipped style tone=${style.tone.x}/${style.tone.y} " +
+                        "color=${style.color.x}/${style.color.y} palette=${style.palette.x}/${style.palette.y} " +
+                        "bloom=${style.bloom} grain=${style.grain} saturation=${style.saturation}",
+                )
+                return null
+            }
+        }
+        val neutral = raw.metadata.asShotNeutral ?: run {
+            Log.i(TAG, "${config.profile} GPU skipped: AsShotNeutral unavailable")
+            return null
+        }
+        val matrix = runCatching { ColorMatrixFactory.cameraToWorkingRgbMatrix(raw.metadata) }
+            .getOrNull() ?: run {
+                Log.i(TAG, "${config.profile} GPU skipped: camera matrix unavailable")
+                return null
+            }
         val gains = runCatching { RgbGains.fromAsShotNeutral(neutral) }.getOrNull() ?: return null
         return try {
             val start = SystemClock.elapsedRealtime()
@@ -53,16 +85,20 @@ internal object GlesRawPurePipeline {
                     session = Session(raw)
                     sessionKey = key
                 }
-                session!!.render(raw, gains, matrix)
+                session!!.render(raw, gains, matrix, config)
             }.get()
-            Log.i(TAG, "PURE GPU render ${result.width}x${result.height} elapsedMs=${SystemClock.elapsedRealtime() - start}")
+            Log.i(
+                TAG,
+                "${config.profile} GPU render ${result.width}x${result.height} " +
+                    "elapsedMs=${SystemClock.elapsedRealtime() - start}",
+            )
             result
         } catch (error: Exception) {
-            Log.w(TAG, "experimental GLES PURE path unavailable; using CPU reference", error)
+            Log.w(TAG, "experimental GLES ${config.profile} path unavailable; using CPU reference", error)
             reset()
             null
         } catch (error: LinkageError) {
-            Log.w(TAG, "experimental GLES PURE path linkage unavailable; using CPU reference", error)
+            Log.w(TAG, "experimental GLES ${config.profile} path linkage unavailable; using CPU reference", error)
             reset()
             null
         }
@@ -126,11 +162,16 @@ internal object GlesRawPurePipeline {
             initializeResources()
         }
 
-        fun render(raw: RawImage, gains: RgbGains, matrix: FloatArray): Result {
+        fun render(
+            raw: RawImage,
+            gains: RgbGains,
+            matrix: FloatArray,
+            config: ProcessingConfiguration,
+        ): Result {
             uploadRaw(raw)
             renderWorking(raw, gains, matrix)
             val residual = readResidualWb()
-            renderFinal(residual)
+            renderFinal(residual, config)
             return readFinal()
         }
 
@@ -298,11 +339,28 @@ internal object GlesRawPurePipeline {
             return WhiteBalanceStage.auto(sample)
         }
 
-        private fun renderFinal(gains: RgbGains) {
+        private fun renderFinal(gains: RgbGains, config: ProcessingConfiguration) {
             attach(outputTexture, width, height)
             GLES30.glUseProgram(finalProgram)
             bindTexture(finalProgram, "uWorking", 0, workingTexture)
             uniform3(finalProgram, "uGains", floatArrayOf(gains.r, gains.g, gains.b))
+            val natural = config.profile == ProcessingProfile.NATURAL
+            uniform1i(finalProgram, "uProfile", if (natural) 1 else 0)
+            uniform1(finalProgram, "uWarmth", if (natural) naturalWarmth(config.tone) else 0f)
+            uniform1(finalProgram, "uExposureGain", if (natural) 2f.pow(config.tone.exposureStops) else 1f)
+            uniform1(finalProgram, "uToneGamma", if (natural) config.tone.midtoneGamma else 1f)
+            uniform1(finalProgram, "uToneContrast", if (natural) config.tone.contrast else 0f)
+            uniform1(finalProgram, "uRollStart", if (natural) config.tone.highlightRollOffStart else 1f)
+            uniform1(finalProgram, "uRollCompression", if (natural) config.tone.highlightCompression else 0f)
+            uniform1(
+                finalProgram,
+                "uChromaStrength",
+                if (natural) config.chromaSmoothStrength +
+                    STYLE_CHROMA_DENOISE_STRENGTH * config.style.strength.coerceIn(0f, 1f)
+                else 0f,
+            )
+            uniform1(finalProgram, "uLumaStrength", if (natural) config.lumaSmoothStrength else 0f)
+            uniform1(finalProgram, "uSharpenAmount", if (natural) config.sharpenAmount else 0f)
             draw()
         }
 
@@ -564,24 +622,100 @@ internal object GlesRawPurePipeline {
     private const val FINAL_SHADER = """
         #version 300 es
         precision highp float;
+        precision highp int;
         uniform sampler2D uWorking;
         uniform vec3 uGains;
+        uniform int uProfile;
+        uniform float uWarmth;
+        uniform float uExposureGain;
+        uniform float uToneGamma;
+        uniform float uToneContrast;
+        uniform float uRollStart;
+        uniform float uRollCompression;
+        uniform float uChromaStrength;
+        uniform float uLumaStrength;
+        uniform float uSharpenAmount;
         layout(location = 0) out vec4 outColor;
-        float encode(float x) {
-            x = clamp(x, 0.0, 1.0);
-            return x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 0.4166666667) - 0.055;
+
+        float luminance(vec3 value) {
+            return value.r * 0.2126 + value.g * 0.7152 + value.b * 0.0722;
         }
-        void main() {
-            ivec2 p = ivec2(gl_FragCoord.xy);
-            vec3 value = texelFetch(uWorking, p, 0).rgb * uGains;
+
+        vec3 workingAt(ivec2 p) {
+            ivec2 size = textureSize(uWorking, 0);
+            return texelFetch(uWorking, clamp(p, ivec2(0), size - ivec2(1)), 0).rgb * uGains;
+        }
+
+        vec3 neutralizeClipped(vec3 value) {
             float minimum = min(value.r, min(value.g, value.b));
             float maximum = max(value.r, max(value.g, value.b));
             float middle = value.r + value.g + value.b - minimum - maximum;
             if (minimum > 0.6 && middle > 0.95) {
                 float amount = clamp((middle - 0.95) / 0.25, 0.0, 1.0);
                 float neutral = (value.r + value.g + value.b) / 3.0;
-                value = mix(value, vec3(neutral), amount);
+                return mix(value, vec3(neutral), amount);
             }
+            return value;
+        }
+
+        vec3 naturalMap(ivec2 p) {
+            vec3 value = neutralizeClipped(workingAt(p));
+            value *= vec3(1.0 + uWarmth, 1.0, 1.0 - uWarmth) * uExposureGain;
+            float sourceLuma = luminance(value);
+            if (sourceLuma > 0.0) {
+                float mapped = sourceLuma <= 0.18
+                    ? 0.18 * pow(max(sourceLuma / 0.18, 0.0), uToneGamma)
+                    : 0.18 * pow(max(sourceLuma / 0.18, 0.0), 1.0 + uToneContrast);
+                value *= mapped / sourceLuma;
+            }
+            float maximum = max(value.r, max(value.g, value.b));
+            if (maximum > uRollStart && uRollStart < 1.0) {
+                float span = 1.0 - uRollStart;
+                float t = clamp((maximum - uRollStart) / span, 0.0, 1.0);
+                float exponent = 1.0 + uRollCompression * 0.75;
+                float mapped = uRollStart + span * pow(t, exponent);
+                value *= mapped / maximum;
+            }
+            return value;
+        }
+
+        vec3 naturalFiltered(ivec2 p) {
+            vec3 center = naturalMap(p);
+            float centerLuma = luminance(center);
+            float blurLuma = 0.0;
+            float blurWeight = 0.0;
+            for (int y = -1; y <= 1; y++) {
+                for (int x = -1; x <= 1; x++) {
+                    float weight = float((x == 0 ? 2 : 1) * (y == 0 ? 2 : 1));
+                    blurLuma += luminance(naturalMap(p + ivec2(x, y))) * weight;
+                    blurWeight += weight;
+                }
+            }
+            blurLuma /= blurWeight;
+
+            vec3 mean = vec3(0.0);
+            for (int y = 0; y <= 1; y++) {
+                for (int x = 0; x <= 1; x++) mean += naturalMap(p + ivec2(x, y));
+            }
+            mean *= 0.25;
+            float meanLuma = luminance(mean);
+            vec3 centerChroma = center - vec3(centerLuma);
+            vec3 meanChroma = mean - vec3(meanLuma);
+            float outputLuma = centerLuma + uLumaStrength * (blurLuma - centerLuma);
+            vec3 value = vec3(outputLuma) +
+                centerChroma + uChromaStrength * (meanChroma - centerChroma);
+            value += vec3((centerLuma - blurLuma) * uSharpenAmount);
+            return value;
+        }
+
+        float encode(float x) {
+            x = clamp(x, 0.0, 1.0);
+            return x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 0.4166666667) - 0.055;
+        }
+
+        void main() {
+            ivec2 p = ivec2(gl_FragCoord.xy);
+            vec3 value = uProfile == 1 ? naturalFiltered(p) : neutralizeClipped(workingAt(p));
             outColor = vec4(encode(value.r), encode(value.g), encode(value.b), 1.0);
         }
     """
