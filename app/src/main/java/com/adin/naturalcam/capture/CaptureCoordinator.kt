@@ -1,4 +1,5 @@
 package com.adin.naturalcam.capture
+import android.net.Uri
 
 import android.graphics.BitmapFactory
 import android.os.SystemClock
@@ -137,6 +138,24 @@ class CaptureCoordinator(
                 return fail(request, e.toCaptureError())
             }
             val captureMs = SystemClock.elapsedRealtime() - captureStart
+            var provisionalPhoto: SavedPhoto? = null
+            var completed = false
+            if (
+                request.profile == ProcessingProfile.NATURAL &&
+                plan.source == CaptureSource.RAW_SENSOR &&
+                request.rawMode != RawMode.RAW_ONLY &&
+                frames.halJpegBytes != null
+            ) {
+                val provisionalMetadata = withLocation(frames.metadata, request.outputSettings.locationTagging)
+                provisionalPhoto = withContext(processingDispatcher) {
+                    mediaStore.saveJpeg(
+                        frames.halJpegBytes,
+                        FileNaming.jpegName(provisionalMetadata.timestampMs),
+                        provisionalMetadata,
+                        request.outputSettings.locationTagging,
+                    )
+                }
+            }
 
             val previewJpeg = withContext(processingDispatcher) {
                 createQuickPreview(frames.halJpegBytes ?: frames.jpegBytes)
@@ -149,7 +168,7 @@ class CaptureCoordinator(
                 // cannot be preempted — its bound is performance (see LIMITATIONS.md).
                 withTimeoutOrNull(PROCESSING_TIMEOUT_MS) {
                     withContext(processingDispatcher) {
-                        developGate.withLock { processAndSave(request, plan, frames) }
+                        developGate.withLock { processAndSave(request, plan, frames, provisionalPhoto) }
                     }
                 } ?: return fail(request, CameraError.ProcessingFailed("processing timed out after ${PROCESSING_TIMEOUT_MS / 1000}s"))
             } catch (e: CancellationException) {
@@ -162,6 +181,7 @@ class CaptureCoordinator(
                 // Single owner for temp RAW files; every burst file is deleted after processing.
                 frames.rawDngFiles.forEach { it.delete() }
             }
+            completed = true
             val processMs = SystemClock.elapsedRealtime() - processStart
             Log.d(
                 TAG,
@@ -188,6 +208,7 @@ class CaptureCoordinator(
         request: PhotoCaptureRequest,
         plan: CapturePlan,
         frames: CapturedFrames,
+        provisionalPhoto: SavedPhoto?,
     ): PhotoCaptureResult {
         val metadata = withLocation(frames.metadata, request.outputSettings.locationTagging)
         val config = ProcessingConfiguration.forProfile(
@@ -206,7 +227,7 @@ class CaptureCoordinator(
 
         val result = when {
             frames.rawDngFiles.isNotEmpty() ->
-                processRawCapture(request, plan, frames, metadata, config, limitations, timings)
+                processRawCapture(request, plan, frames, metadata, config, limitations, timings, provisionalPhoto)
             frames.yuv != null -> {
                 if (BuildConfig.DEBUG && request.profile == ProcessingProfile.NATURAL) {
                     Log.d(
@@ -261,6 +282,7 @@ class CaptureCoordinator(
         config: ProcessingConfiguration,
         limitations: Set<CaptureLimitation>,
         timings: ProcessingTimings? = null,
+        provisionalPhoto: SavedPhoto? = null,
     ): PhotoCaptureResult {
         val dngFile = frames.rawDngFiles.firstOrNull()
             ?: throw CameraException(CameraError.ProcessingFailed("RAW capture returned no DNG"))
@@ -363,7 +385,12 @@ class CaptureCoordinator(
         val encoded = pipeline.processRaw(rawImage, config, timings)
         timings?.record("pipeline", SystemClock.elapsedRealtime() - processStart)
         val photo = saveFinalJpeg(
-            encoded.bytes, nameTimestamp, fullMetadata.copy(orientationDegrees = 0), request, timings,
+            encoded.bytes,
+            nameTimestamp,
+            fullMetadata.copy(orientationDegrees = 0),
+            request,
+            timings,
+            provisionalPhoto,
         )
         return PhotoCaptureResult(
             photo, rawPhoto, fullMetadata, request.profile, config.pipelineVersion, processingLimitations,
@@ -381,15 +408,32 @@ class CaptureCoordinator(
         metadata: CaptureMetadata,
         request: PhotoCaptureRequest,
         timings: ProcessingTimings? = null,
+        provisionalPhoto: SavedPhoto? = null,
     ): SavedPhoto {
         _captureState.value = CaptureState.Saving
         val saveStart = SystemClock.elapsedRealtime()
-        val saved = mediaStore.saveJpeg(
-            bytes = bytes,
-            fileName = FileNaming.jpegName(timestampMs),
-            metadata = metadata,
-            locationTagging = request.outputSettings.locationTagging,
-        )
+        val saved = if (provisionalPhoto != null) {
+            mediaStore.replaceJpeg(
+                photo = provisionalPhoto,
+                bytes = bytes,
+                metadata = metadata,
+                locationTagging = request.outputSettings.locationTagging,
+            ) ?: mediaStore.saveJpeg(
+                bytes = bytes,
+                fileName = FileNaming.jpegName(timestampMs),
+                metadata = metadata,
+                locationTagging = request.outputSettings.locationTagging,
+            ).also {
+                if (it != null) mediaStore.delete(Uri.parse(provisionalPhoto.uri))
+            }
+        } else {
+            mediaStore.saveJpeg(
+                bytes = bytes,
+                fileName = FileNaming.jpegName(timestampMs),
+                metadata = metadata,
+                locationTagging = request.outputSettings.locationTagging,
+            )
+        }
         timings?.record("save", SystemClock.elapsedRealtime() - saveStart)
         return saved ?: throw CameraException(CameraError.StorageFailed("MediaStore rejected the JPEG write"))
     }

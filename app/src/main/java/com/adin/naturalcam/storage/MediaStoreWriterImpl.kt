@@ -44,6 +44,23 @@ class MediaStoreWriterImpl(
             null
         }
     }
+    override suspend fun replaceJpeg(
+        photo: SavedPhoto,
+        bytes: ByteArray,
+        metadata: CaptureMetadata,
+        locationTagging: Boolean,
+    ): SavedPhoto? = withContext(ioDispatcher) {
+        try {
+            val exif = ExifMetadataWriter.apply(bytes, metadata, locationTagging)
+            write(Uri.parse(photo.uri), exif.bytes)
+            savedPhoto(Uri.parse(photo.uri), photo.fileName, StoragePaths.JPEG_MIME, exif.width, exif.height)
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            Log.w(TAG, "replaceJpeg failed for ${photo.fileName}", e)
+            null
+        }
+    }
+
 
     override suspend fun saveDng(
         file: File,

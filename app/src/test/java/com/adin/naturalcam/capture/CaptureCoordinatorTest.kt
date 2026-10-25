@@ -153,6 +153,13 @@ class CaptureCoordinatorTest {
             savedJpegs += fileName
             return SavedPhoto("content://test/$fileName", fileName, 4, 4, "image/jpeg")
         }
+        override suspend fun replaceJpeg(
+            photo: SavedPhoto,
+            bytes: ByteArray,
+            metadata: CaptureMetadata,
+            locationTagging: Boolean,
+        ): SavedPhoto? = photo
+
 
         override suspend fun saveDng(file: File, fileName: String, metadata: CaptureMetadata): SavedPhoto? {
             saveGate?.await()

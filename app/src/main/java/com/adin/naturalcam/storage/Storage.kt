@@ -20,6 +20,13 @@ interface MediaStoreWriter {
         metadata: CaptureMetadata,
         locationTagging: Boolean,
     ): SavedPhoto?
+    /** Replaces an already published JPEG in place without creating a gallery duplicate. */
+    suspend fun replaceJpeg(
+        photo: SavedPhoto,
+        bytes: ByteArray,
+        metadata: CaptureMetadata,
+        locationTagging: Boolean,
+    ): SavedPhoto?
 
     /** Saves a DNG file without loading the full RAW into a second heap buffer. */
     suspend fun saveDng(
