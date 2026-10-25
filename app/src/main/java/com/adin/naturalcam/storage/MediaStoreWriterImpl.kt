@@ -11,7 +11,7 @@ import com.adin.naturalcam.domain.SavedPhoto
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayInputStream
+import java.io.File
 import java.io.IOException
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -46,7 +46,7 @@ class MediaStoreWriterImpl(
     }
 
     override suspend fun saveDng(
-        bytes: ByteArray,
+        file: File,
         fileName: String,
         metadata: CaptureMetadata,
     ): SavedPhoto? = withContext(ioDispatcher) {
@@ -56,9 +56,9 @@ class MediaStoreWriterImpl(
         var uri: Uri? = null
         try {
             uri = insert(fileName, StoragePaths.DNG_MIME, metadata.timestampMs) ?: return@withContext null
-            write(uri, bytes)
+            write(uri, file)
             clearPending(uri)
-            val exif = ExifInterface(ByteArrayInputStream(bytes))
+            val exif = ExifInterface(file.path)
             savedPhoto(
                 uri,
                 fileName,
@@ -99,6 +99,14 @@ class MediaStoreWriterImpl(
         val stream = context.contentResolver.openOutputStream(uri)
             ?: throw IOException("openOutputStream returned null for $uri")
         stream.use { it.write(bytes) }
+    }
+
+    private fun write(uri: Uri, file: File) {
+        val output = context.contentResolver.openOutputStream(uri)
+            ?: throw IOException("openOutputStream returned null for $uri")
+        output.use { stream ->
+            file.inputStream().use { input -> input.copyTo(stream) }
+        }
     }
 
     private fun clearPending(uri: Uri) {

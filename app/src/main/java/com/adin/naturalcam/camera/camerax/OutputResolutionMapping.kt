@@ -7,29 +7,24 @@ import com.adin.naturalcam.domain.AspectRatio
 
 /**
  * Domain aspect ratio and output-size policy → CameraX stream configuration.
- * Maximum mode keeps the selected aspect ratio where one exists, then asks
- * CameraX for the largest compatible stream (AGENTS 35).
+ * 4:3 is the full-resolution sensor mode; 16:9 keeps its aspect-constrained
+ * stream unless the explicit maximum policy is requested (AGENTS 35).
  */
 object OutputResolutionMapping {
 
     fun resolutionSelector(aspect: AspectRatio, highestResolution: Boolean = false): ResolutionSelector {
-        if (highestResolution) {
+        if (aspect == AspectRatio.RATIO_4_3 || highestResolution) {
             val builder = ResolutionSelector.Builder()
                 .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
             when (aspect) {
-                AspectRatio.RATIO_4_3 -> builder.setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
-                AspectRatio.RATIO_16_9 -> builder.setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
-                AspectRatio.RATIO_FULL -> Unit
+                AspectRatio.RATIO_4_3 ->
+                    builder.setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+                AspectRatio.RATIO_16_9 ->
+                    builder.setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
             }
             return builder.build()
         }
-        return when (aspect) {
-            AspectRatio.RATIO_4_3 -> base(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
-            AspectRatio.RATIO_16_9 -> base(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
-            AspectRatio.RATIO_FULL -> ResolutionSelector.Builder()
-                .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
-                .build()
-        }
+        return base(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
     }
 
     private fun base(strategy: AspectRatioStrategy): ResolutionSelector =

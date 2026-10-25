@@ -83,7 +83,7 @@ fun CameraScreen(
             ?.asImageBitmap()
     }
 
-    LaunchedEffect(state.selectedCameraId) {
+    LaunchedEffect(state.selectedCameraId, state.wideAngleActive) {
         if (frozenLensFrame != null) {
             delay(300)
             frozenLensFrame = null
@@ -351,7 +351,7 @@ private fun Preview(
 private fun previewFrameRatio(aspectRatio: AspectRatio, portrait: Boolean): Float? {
     val captureRatio = when (aspectRatio) {
         AspectRatio.RATIO_4_3 -> 4f / 3f
-        AspectRatio.RATIO_16_9, AspectRatio.RATIO_FULL -> return null
+        AspectRatio.RATIO_16_9 -> return null
     }
     return if (portrait) 1f / captureRatio else captureRatio
 }

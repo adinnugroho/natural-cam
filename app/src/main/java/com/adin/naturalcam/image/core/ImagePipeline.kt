@@ -189,8 +189,8 @@ class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
             ImageRotation.rotate(argb, out.width, out.height, orientationDegrees)
         }
         // The selected aspect ratio is applied here, in display orientation, after rotation:
-        // the RAW develop has no other crop, so without this the 16:9 / 4:3 / Full control
-        // did nothing in NATURAL/PURE while the platform JPEG path honoured it.
+        // RAW develop had no crop stage, so without this the 16:9 control did nothing
+        // while the platform JPEG path honoured the setting.
         val cropped = timings.measureStage("crop") {
             AspectCropper.crop(rotated.argb, rotated.width, rotated.height, config.outputAspect)
         }

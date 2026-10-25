@@ -73,6 +73,18 @@ class ChromaSmootherTest {
     }
 
     @Test
+    fun `a base strength denoises chroma without a shading map`() {
+        val image = TestImages.checkerboard(8)
+        val lumaBefore = FloatArray(64) { luma(image.r[it], image.g[it], image.b[it]) }
+        val before = spread(image)
+        ChromaSmoother.apply(image, null, baseStrength = 0.7f)
+        assertTrue("chroma spread ${spread(image)} not below $before", spread(image) < before * 0.6f)
+        for (i in 0 until 64) {
+            assertTrue(kotlin.math.abs(lumaBefore[i] - luma(image.r[i], image.g[i], image.b[i])) < 1e-6f)
+        }
+    }
+
+    @Test
     fun `the edge gate reacts to structure, not to the guide's noise`() {
         // Two flat halves carrying chroma noise: (a) no step, (b) a luma step below the
         // edge threshold, (c) a real edge that also carries a chroma difference. The gate

@@ -73,10 +73,10 @@ internal fun StylePreviewOverlay(style: StyleState, modifier: Modifier) {
             )
         }
         if (grain > 0f) {
-            // Preview approximation: capture adds deterministic linear-light monochrome
-            // grain weighted to midtones; a tiled noise bitmap in Overlay blend keeps the
-            // image mean unchanged and only moves local contrast.
-            drawRect(brush = grainBrush, blendMode = BlendMode.Overlay, alpha = grain * 0.6f)
+            // Preview approximation: capture adds restrained monochrome grain after
+            // output transfer. Keep the overlay weaker than the saved-pixel effect so
+            // the live view does not read as a stamped texture.
+            drawRect(brush = grainBrush, blendMode = BlendMode.Overlay, alpha = grain * 0.16f)
         }
     }
 }
@@ -122,11 +122,9 @@ private fun saturationColorMatrix(scale: Float): FloatArray {
 }
 
 /**
- * Fixed noise tile for the grain preview. Generated once from the same grain
- * field the capture stage uses, so the overlay shows the same clumped character;
- * a deterministic tile keeps the overlay allocation-free while dragging. The
- * tile is large enough to hold several density patches, which keeps the repeat
- * from reading as a pattern.
+ * Fixed noise tile for the grain preview. Generated once from the same per-pixel
+ * field the capture stage uses; the tile keeps recomposition allocation-free while
+ * dragging and repeats beyond the viewport without a visible patch structure.
  */
 private val GRAIN_TILE: ImageBitmap by lazy {
     val size = 512

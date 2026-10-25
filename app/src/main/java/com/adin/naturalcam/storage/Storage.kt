@@ -3,6 +3,7 @@ package com.adin.naturalcam.storage
 import android.net.Uri
 import com.adin.naturalcam.domain.CaptureMetadata
 import com.adin.naturalcam.domain.SavedPhoto
+import java.io.File
 
 /**
  * Storage boundary. User-visible photos go to MediaStore (AGENTS 50) under
@@ -20,9 +21,9 @@ interface MediaStoreWriter {
         locationTagging: Boolean,
     ): SavedPhoto?
 
-    /** Saves a DNG file. fileName shares the capture's base identifier (SPEC 86). */
+    /** Saves a DNG file without loading the full RAW into a second heap buffer. */
     suspend fun saveDng(
-        bytes: ByteArray,
+        file: File,
         fileName: String,
         metadata: CaptureMetadata,
     ): SavedPhoto?

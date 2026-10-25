@@ -140,22 +140,6 @@ object ChromaSmoother {
         if (grid == null && baseStrength <= 0f) return rgb
         val width = rgb.width
         val height = rgb.height
-        val columns = map?.columns ?: 1
-        val rows = map?.rows ?: 1
-
-        val scaleX = if (width <= 1) 0f else (columns - 1).toFloat() / (width - 1)
-        val columnLow = IntArray(width)
-        val columnHigh = IntArray(width)
-        val columnFrac = FloatArray(width)
-        for (x in 0 until width) {
-            val gx = x * scaleX
-            val low = gx.toInt().coerceIn(0, columns - 1)
-            val high = (low + 1).coerceAtMost(columns - 1)
-            columnLow[x] = low
-            columnHigh[x] = high
-            columnFrac[x] = if (high == low) 0f else gx - low
-        }
-        val scaleY = if (height <= 1) 0f else (rows - 1).toFloat() / (height - 1)
 
         val planeWidth = (width + 1) / 2
         val planeHeight = (height + 1) / 2
@@ -196,8 +180,28 @@ object ChromaSmoother {
         edgeAwareBlur121Vertical(crPlane, lumaPlane, blurredCr, planeWidth, planeHeight, edgeThreshold)
         edgeAwareBlur121Horizontal(cbPlane, lumaPlane, cbPlane, planeWidth, planeHeight, edgeThreshold)
         edgeAwareBlur121Vertical(cbPlane, lumaPlane, blurredCb, planeWidth, planeHeight, edgeThreshold)
+        if (grid == null) {
+            applyUniform(rgb, blurredCr, blurredCb, planeWidth, planeHeight, baseStrength)
+            return rgb
+        }
 
 
+        val columns = map?.columns ?: 1
+        val rows = map?.rows ?: 1
+
+        val scaleX = if (width <= 1) 0f else (columns - 1).toFloat() / (width - 1)
+        val columnLow = IntArray(width)
+        val columnHigh = IntArray(width)
+        val columnFrac = FloatArray(width)
+        for (x in 0 until width) {
+            val gx = x * scaleX
+            val low = gx.toInt().coerceIn(0, columns - 1)
+            val high = (low + 1).coerceAtMost(columns - 1)
+            columnLow[x] = low
+            columnHigh[x] = high
+            columnFrac[x] = if (high == low) 0f else gx - low
+        }
+        val scaleY = if (height <= 1) 0f else (rows - 1).toFloat() / (height - 1)
         // Pass 3: rebuild, keeping each pixel's own luma exactly.
         CpuParallel.forEach(height, minItemsPerTask = 128) { startRow, endRow ->
             for (y in startRow until endRow) {
@@ -217,14 +221,10 @@ object ChromaSmoother {
 
                 val base = y * width
                 for (x in 0 until width) {
-                    val gain = if (grid == null) {
-                        1f
-                    } else {
-                        bilinearGridGain(
-                            grid, gainBaseLow, gainBaseHigh,
-                            columnLow[x], columnHigh[x], columnFrac[x], gainRowFrac,
-                        )
-                    }
+                    val gain = bilinearGridGain(
+                        grid, gainBaseLow, gainBaseHigh,
+                        columnLow[x], columnHigh[x], columnFrac[x], gainRowFrac,
+                    )
                     // Base strength covers the sensor's own chroma noise anywhere in
                     // the frame; the shading term adds back what the correction
                     // amplified. Without a base, the centre of the frame — where the
@@ -265,6 +265,64 @@ object ChromaSmoother {
             }
         }
         return rgb
+    }
+
+    /**
+     * Rebuilds a frame when no lens-shading map is present. The style chain uses this
+     * path; keeping map interpolation out of the inner loop preserves the same pixels
+     * without paying for a gain that is always 1.
+     */
+    private fun applyUniform(
+        rgb: RgbImage,
+        blurredCr: FloatArray,
+        blurredCb: FloatArray,
+        planeWidth: Int,
+        planeHeight: Int,
+        baseStrength: Float,
+    ) {
+        val width = rgb.width
+        val height = rgb.height
+        val strength = baseStrength.coerceIn(0f, MAX_STRENGTH)
+        val red = rgb.r
+        val green = rgb.g
+        val blue = rgb.b
+        CpuParallel.forEach(height, minItemsPerTask = 128) { startRow, endRow ->
+            for (y in startRow until endRow) {
+                val v = y * 0.5f
+                val planeRow = v.toInt().coerceIn(0, planeHeight - 1)
+                val planeRowNext = (planeRow + 1).coerceAtMost(planeHeight - 1)
+                val fracY = v - planeRow
+                val offHere = planeRow * planeWidth
+                val offNext = planeRowNext * planeWidth
+                val base = y * width
+                for (x in 0 until width) {
+                    val u = x * 0.5f
+                    val planeColumn = u.toInt().coerceIn(0, planeWidth - 1)
+                    val planeColumnNext = (planeColumn + 1).coerceAtMost(planeWidth - 1)
+                    val fracU = u - planeColumn
+                    val targetR = sample(
+                        blurredCr[offHere + planeColumn], blurredCr[offHere + planeColumnNext],
+                        blurredCr[offNext + planeColumn], blurredCr[offNext + planeColumnNext],
+                        fracU, fracY,
+                    )
+                    val targetB = sample(
+                        blurredCb[offHere + planeColumn], blurredCb[offHere + planeColumnNext],
+                        blurredCb[offNext + planeColumn], blurredCb[offNext + planeColumnNext],
+                        fracU, fracY,
+                    )
+                    val index = base + x
+                    val r = red[index]
+                    val g = green[index]
+                    val b = blue[index]
+                    val deltaR = strength * (targetR - (r - g))
+                    val deltaB = strength * (targetB - (b - g))
+                    val deltaLuma = LUMA_R * deltaR + LUMA_B * deltaB
+                    red[index] = r + deltaR - deltaLuma
+                    green[index] = g - deltaLuma
+                    blue[index] = b + deltaB - deltaLuma
+                }
+            }
+        }
     }
 
     private fun sample(
@@ -477,7 +535,13 @@ object Sharpener {
         // for all three channels keeps the sharpening from reacting to a change
         // in *chroma* noise (the smoother's) as though it were detail.
         var cut = 0f
-        for ((index, channel) in arrayOf(rgb.g, rgb.r, rgb.b).withIndex()) {
+        var channelIndex = 0
+        while (channelIndex < 3) {
+            val channel = when (channelIndex) {
+                0 -> rgb.g
+                1 -> rgb.r
+                else -> rgb.b
+            }
             var source = channel
             var target = blurredA
             repeat(passes) {
@@ -485,7 +549,7 @@ object Sharpener {
                 source = target
                 target = if (target === blurredA) blurredB else blurredA
             }
-            if (index == 0) cut = NOISE_REJECT * noiseFloor(channel, source)
+            if (channelIndex == 0) cut = NOISE_REJECT * noiseFloor(channel, source)
             CpuParallel.forEach(n) { start, end ->
                 for (i in start until end) {
                     val detail = channel[i] - source[i]
@@ -495,6 +559,7 @@ object Sharpener {
                     }
                 }
             }
+            channelIndex++
         }
         return rgb
     }
@@ -567,7 +632,13 @@ object BloomStage {
         val mask = FloatArray(maskSize)
         val blurred = FloatArray(maskSize)
         val work = FloatArray(maskSize)
-        for (channel in arrayOf(rgb.r, rgb.g, rgb.b)) {
+        var channelIndex = 0
+        while (channelIndex < 3) {
+            val channel = when (channelIndex) {
+                0 -> rgb.r
+                1 -> rgb.g
+                else -> rgb.b
+            }
             accumulateHighlights(channel, rgb.width, rgb.height, mask, maskWidth, maskHeight)
             var source = mask
             var target = blurred
@@ -576,7 +647,8 @@ object BloomStage {
                 source = target
                 target = if (target === blurred) mask else blurred
             }
-            CpuParallel.forEach(rgb.height) { startRow, endRow ->
+            // This is a row count, so the pixel-sized default would serialize a full frame.
+            CpuParallel.forEach(rgb.height, minItemsPerTask = 128) { startRow, endRow ->
                 for (y in startRow until endRow) {
                     val row = y * rgb.width
                     val gy = (y + 0.5f) * maskHeight / rgb.height
@@ -593,6 +665,7 @@ object BloomStage {
                     }
                 }
             }
+            channelIndex++
         }
         return rgb
     }
@@ -643,9 +716,8 @@ object BloomStage {
 }
 
 /**
- * Bilinear sample with half-texel centering; clamped at the border. Shared by the
- * bloom glow and the grain detail mask, which both build a small field at reduced
- * resolution and upsample it per output pixel.
+ * Bilinear sample with half-texel centering; used by the bloom mask, which
+ * builds a small field at reduced resolution and upsamples it per output pixel.
  */
 internal fun sampleBilinear(src: FloatArray, width: Int, height: Int, x: Float, y: Float): Float {
     val gx = (x - 0.5f).coerceIn(0f, (width - 1).toFloat())
@@ -662,88 +734,43 @@ internal fun sampleBilinear(src: FloatArray, width: Int, height: Int, x: Float, 
 }
 
 /**
- * Film-like grain for the explicit Grain control, applied to the *delivered*
- * pixels — the ARGB image the encoder is about to receive, after tone mapping,
- * gamut mapping, and the output transfer curve.
+ * Restrained monochrome grain for the explicit Grain control.
  *
- * That placement is the whole point. Adding grain earlier (in linear working
- * light) looks neutral in theory but is not: the output transfer curve compresses
- * the channels differently, so an equal linear delta lands as unequal encoded
- * deltas, and it clips unevenly against black. Measured through the real pipeline,
- * a linear-light offset grew chroma noise by 29% in the black band, a uniform RGB
- * gain by 20% in midtones, and a luma-scaled linear delta by 75% of its own luma
- * energy in chroma — i.e. all three arrived as colour speckle. Here every channel
- * receives the *same integer* shift, bounded so the pixel cannot leave 0..255, so
- * channel differences (R−G, B−G) are preserved exactly and grain can never be
- * coloured. Rounding the shift to whole levels costs at most half a level, far
- * below JPEG's own precision, and buys that exactness.
+ * The grain is applied to delivered pixels so one bounded integer shift can be
+ * shared by R, G, and B without creating chroma noise. It is deliberately
+ * uncorrelated per pixel: the previous lattice, density, and detail masks made
+ * obvious synthetic patches and caused grain to disappear around edges.
  *
- * The field itself is deterministic and built from three layers: per-pixel speckle,
- * a [CLUMP_STEP]-pixel lattice octave whose lattice noise is interpolated *linearly*
- * (a smoothstep profile softened the clumps into blobs and read as blur), and a
- * [DENSITY_STEP]-pixel field that only nudges the amplitude so the sheet is not
- * perfectly even. Everything is a hash of the coordinate, so repeated develops of one
- * capture match and no random state has to be threaded through the pipeline.
- *
- * The integer shift is dithered with a per-pixel hash before rounding. Rounding alone
- * quantises the effect in whole levels, which at small amounts leaves a sparse
- * salt-and-pepper pattern instead of the intended fine texture; the dither keeps the
- * average amplitude and stays colour-neutral because the same integer still lands on
- * all three channels.
- *
- * Amplitude is dynamic — it follows the image instead of being a fixed overlay:
- * it scales with encoded luma (film density, so black stays clean and grain never
- * clips), a midtone bell with a floor, and a local-detail mask that backs the grain
- * off where the picture already has texture or edges, which is where real grain
- * stops being visible anyway. The detail measure is peak-pooled at
- * [DETAIL_DOWNSAMPLE] resolution, so the mask costs a small field instead of a
- * full-resolution buffer. Amount 0 is an exact no-op.
+ * Two decorrelated uniform samples form a bounded triangular distribution. This
+ * has a softer centre than a flat random field without introducing visible
+ * clumps. The amount follows encoded luma and a restrained midtone bell, so
+ * black stays clean and highlights do not become noisy.
  */
 object GrainStage {
 
-    /** Peak relative luma delta at amount 1, before the midtone and detail weights. */
-    private const val MAX_GAIN = 0.32f
+    /**
+     * Peak encoded-level delta at amount 1 before luma and midtone weighting.
+     * The previous 0.32f value could reach roughly ±41 levels in a midtone,
+     * which read as an overlay rather than photographic grain.
+     */
+    private const val MAX_GAIN = 0.08f
 
     /** Weight floor for shadows and highlights; midtones use the full weight. */
     private const val MIDTONE_FLOOR = 0.25f
 
-    /** Lattice step of the clumped octave, in pixels; ~1 px grain at capture scale. */
-    private const val CLUMP_STEP = 1.6f
-
-    /** Share of the field from the per-pixel octave; the rest comes from the clump octave. */
-    private const val FINE_SHARE = 0.55f
-
-    /** Lattice step of the density field, in pixels. */
-    private const val DENSITY_STEP = 24f
-
-    /** ± swing of the density field around the base amplitude. */
-    private const val DENSITY_SWING = 0.25f
-
-    /** Lattice offsets that decorrelate the density field from the clump lattice. */
-    private const val DENSITY_OFFSET_X = 51.7f
-    private const val DENSITY_OFFSET_Y = 93.1f
-
-    /** Local-detail mask cell size in pixels. */
-    private const val DETAIL_DOWNSAMPLE = 4
-
-    /** Sum of both axis luma gradients (as a share of full scale) where grain halves. */
-    private const val DETAIL_HALF = 0.10f
+    /** Normalizes two uniform samples into a triangular field in [-1, 1]. */
+    private const val TRIANGULAR_SCALE = 0.5f
 
     /** Applies grain in place to the packed ARGB output image. */
     fun apply(argb: IntArray, width: Int, height: Int, strength: Float) {
         val amount = strength.coerceIn(0f, 1f)
         if (amount == 0f || argb.isEmpty() || width <= 0 || height <= 0) return
 
-        val maskWidth = maxOf(1, width / DETAIL_DOWNSAMPLE)
-        val maskHeight = maxOf(1, height / DETAIL_DOWNSAMPLE)
-        val detail = FloatArray(maskWidth * maskHeight)
-        accumulateDetail(argb, width, height, detail, maskWidth, maskHeight)
-
         val peak = MAX_GAIN * amount
-        CpuParallel.forEach(height) { startRow, endRow ->
+        // This is a row count, so the pixel-sized default would serialize a full frame.
+        CpuParallel.forEach(height, minItemsPerTask = 128) { startRow, endRow ->
             for (y in startRow until endRow) {
                 val row = y * width
-                val maskY = (y + 0.5f) * maskHeight / height
                 for (x in 0 until width) {
                     val i = row + x
                     val pixel = argb[i]
@@ -754,24 +781,12 @@ object GrainStage {
                     val normalized = luma / 255f
                     val midtone = MIDTONE_FLOOR +
                         (1f - MIDTONE_FLOOR) * 4f * normalized * (1f - normalized)
-                    // Dynamic part: grain fades out where the image already carries detail.
-                    val localDetail = sampleBilinear(
-                        detail,
-                        maskWidth,
-                        maskHeight,
-                        (x + 0.5f) * maskWidth / width,
-                        maskY,
-                    )
-                    val detailWeight = DETAIL_HALF / (DETAIL_HALF + localDetail)
-                    val delta = luma * sample(x, y) * peak * midtone * detailWeight
-                    // Same whole-level shift on every channel, so R−G and B−G survive
-                    // exactly; the bound keeps the pixel inside 0..255 without clamping
-                    // one channel before another.
+                    val delta = luma * sample(x, y) * peak * midtone
+
+                    // One whole-level shift for all channels preserves the source
+                    // colour exactly; the bounds avoid channel-wise clipping.
                     val lower = -minOf(r, g, b)
                     val upper = 255f - maxOf(r, g, b)
-                    // Dithered rounding: one integer for all three channels (colour stays
-                    // exact) but the fractional part is spent probabilistically, so small
-                    // amounts keep a fine texture instead of a sparse +/-1 salt pattern.
                     val shift = floor(delta.coerceIn(lower, upper) + hash01(x, y)).toInt()
                     if (shift == 0) continue
                     val red = ((pixel shr 16) and 0xFF) + shift
@@ -784,97 +799,13 @@ object GrainStage {
     }
 
     /**
-     * Peak local-detail energy per mask cell: the sum of both axis luma gradients,
-     * peak-pooled so one edge inside a cell protects the whole cell. Peak pooling
-     * (rather than averaging) is what makes the mask track structure instead of
-     * fading out over busy regions.
+     * Amount-independent triangular grain field in [-1, 1].
      *
-     * Gradients are measured between *adjacent* pixels, not as a central difference:
-     * a central difference samples every other pixel and is therefore blind to
-     * detail sitting at the sampling limit, which is exactly the fine texture and
-     * noise the mask has to notice.
+     * The second hash uses a fixed coordinate offset so the two samples are
+     * decorrelated without keeping random state or allocating a frame buffer.
      */
-    private fun accumulateDetail(
-        argb: IntArray,
-        width: Int,
-        height: Int,
-        detail: FloatArray,
-        maskWidth: Int,
-        maskHeight: Int,
-    ) {
-        // Independent mask rows, same as the bloom mask: this was a serial full-frame scan.
-        CpuParallel.forEach(maskHeight, minItemsPerTask = 8) { startRow, endRow ->
-            for (my in startRow until endRow) {
-                val yStart = my * height / maskHeight
-                val yEnd = maxOf(yStart + 1, (my + 1) * height / maskHeight)
-                val maskRow = my * maskWidth
-                for (mx in 0 until maskWidth) {
-                    val xStart = mx * width / maskWidth
-                    val xEnd = maxOf(xStart + 1, (mx + 1) * width / maskWidth)
-                    var peak = 0f
-                    for (y in yStart until yEnd) {
-                        val row = y * width
-                        val down = if (y < height - 1) row + width else row
-                        for (x in xStart until xEnd) {
-                            val i = row + x
-                            val right = if (x < width - 1) i + 1 else i
-                            val luma = lumaAt(argb, i)
-                            val dx = abs(lumaAt(argb, right) - luma)
-                            val dy = abs(lumaAt(argb, down + x) - luma)
-                            val energy = dx + dy
-                            if (energy > peak) peak = energy
-                        }
-                    }
-                    detail[maskRow + mx] = peak / 255f
-                }
-            }
-        }
-    }
-
-    private fun lumaAt(argb: IntArray, index: Int): Float {
-        val pixel = argb[index]
-        return luminance(
-            ((pixel shr 16) and 0xFF).toFloat(),
-            ((pixel shr 8) and 0xFF).toFloat(),
-            (pixel and 0xFF).toFloat(),
-        )
-    }
-
-    /**
-     * Amount-independent grain field for one pixel, normalized to [-1, 1].
-     * Shared by the capture stage and the live preview's noise tile so both show
-     * the same grain character.
-     */
-    internal fun sample(x: Int, y: Int): Float {
-        val fx = x.toFloat()
-        val fy = y.toFloat()
-        val fine = hash(x, y)
-        val clump = valueNoise(fx / CLUMP_STEP, fy / CLUMP_STEP)
-        val density = valueNoise(
-            fx / DENSITY_STEP + DENSITY_OFFSET_X,
-            fy / DENSITY_STEP + DENSITY_OFFSET_Y,
-        )
-        // Normalizing by the peak swing keeps the documented gain bound exact.
-        val field = FINE_SHARE * fine + (1f - FINE_SHARE) * clump
-        return field * (1f + DENSITY_SWING * density) / (1f + DENSITY_SWING)
-    }
-
-    /**
-     * Bilinear value noise on a hash lattice. Interpolation is linear, not smoothstep:
-     * a smoothed profile rounds the lattice peaks into soft blobs, which is what makes
-     * grain look blurred rather than granular.
-     */
-    private fun valueNoise(u: Float, v: Float): Float {
-        val x0 = floor(u)
-        val y0 = floor(v)
-        val fu = u - x0
-        val fv = v - y0
-        val ix = x0.toInt()
-        val iy = y0.toInt()
-        val top = hash(ix, iy) + (hash(ix + 1, iy) - hash(ix, iy)) * fu
-        val bottom = hash(ix, iy + 1) + (hash(ix + 1, iy + 1) - hash(ix, iy + 1)) * fu
-        return top + (bottom - top) * fv
-    }
+    internal fun sample(x: Int, y: Int): Float =
+        (hash(x, y) + hash(x + 1013, y + 1597)) * TRIANGULAR_SCALE
 
     /** Deterministic dither value in [0, 1) for one pixel. */
     private fun hash01(x: Int, y: Int): Float {
@@ -884,7 +815,7 @@ object GrainStage {
         return ((h ushr 8) and 0xFFFF) / 65536f
     }
 
-    /** Deterministic white-noise value in [-1, 1] for one lattice point. */
+    /** Deterministic uniform noise value in [-1, 1] for one coordinate. */
     private fun hash(x: Int, y: Int): Float {
         var h = x * 374761393 + y * 668265263
         h = (h xor (h shr 13)) * 1274126177

@@ -85,4 +85,17 @@ class LensChoicesTest {
         assertEquals(1f, cameraEntry.zoomRatio, 0.0001f)
         assertEquals(CameraId("0"), cameraEntry.cameraId)
     }
+
+    @Test
+    fun `already selected lens does not request preview freeze`() {
+        val selected = lensChoices(
+            lenses,
+            testCapabilities(zoomRatioRange = 1f..10f),
+            CameraId("0"),
+            wideAngleActive = false,
+        ).single()
+
+        assertTrue(selected.selected)
+        assertFalse(lensSwitchNeedsFreeze(selected))
+    }
 }

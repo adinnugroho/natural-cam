@@ -356,7 +356,7 @@ internal fun BottomBar(
                         CameraPopupRow(
                             choices.map { PopupOption(it.label, it.selected) },
                             { index ->
-                                onLensSwitchStarted()
+                                if (lensSwitchNeedsFreeze(choices[index])) onLensSwitchStarted()
                                 actions.onSelectLens(choices[index].cameraId, choices[index].zoomRatio)
                                 onPopupChange(null)
                             },

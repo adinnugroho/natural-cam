@@ -3,7 +3,6 @@ package com.adin.naturalcam.domain
 enum class AspectRatio(val label: String) {
     RATIO_4_3("4:3"),
     RATIO_16_9("16:9"),
-    RATIO_FULL("Full"),
 }
 
 /** User settings; every field has an explicit default (SPEC 128). */
