@@ -298,11 +298,14 @@ class CaptureCoordinator(
         }
         val decodeStart = SystemClock.elapsedRealtime()
         val decodedFrames = frames.rawImages.takeIf { it.isNotEmpty() } ?: frames.rawDngFiles.map(::decodeDng)
+        timings?.record("dngRead", SystemClock.elapsedRealtime() - decodeStart)
+        val fusionStart = SystemClock.elapsedRealtime()
         val fusion = if (plan.rawFrameStrategy == RawFrameStrategy.HDR_BRACKET) {
             RawBracketFusion.fuse(decodedFrames)
         } else {
             GlesRawBurstFusion.tryFuse(decodedFrames) ?: RawBurstFusion.fuse(decodedFrames)
         }
+        timings?.record("rawFusion", SystemClock.elapsedRealtime() - fusionStart)
         val rawImage = fusion.image
         val processingLimitations = buildSet {
             addAll(rawCompanionLimitations)
