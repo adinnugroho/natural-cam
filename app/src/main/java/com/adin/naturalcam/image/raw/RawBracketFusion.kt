@@ -18,7 +18,18 @@ object RawBracketFusion {
             frames.indices.filter { it != referenceIndex }.forEach { add(frames[it]) }
         }
         val result = GlesRawBurstFusion.tryFuse(ordered) ?: RawBurstFusion.fuse(ordered)
-        return result.copy(backend = "hdr-${result.backend}")
+        // A partial bracket merge can create ghosted exposure edges. The geometric reference is
+        // safer than mixing only one companion frame; the caller records the fallback limitation.
+        return if (result.mergedFrameCount != ordered.size) {
+            result.copy(
+                image = ordered.first(),
+                mergedFrameCount = 1,
+                skippedFrameCount = ordered.size - 1,
+                backend = "hdr-reference",
+            )
+        } else {
+            result.copy(backend = "hdr-${result.backend}")
+        }
     }
 
     private fun exposureProductOrDefault(image: RawImage): Double {
