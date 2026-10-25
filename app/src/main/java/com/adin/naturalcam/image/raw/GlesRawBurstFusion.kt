@@ -67,16 +67,22 @@ internal object GlesRawBurstFusion {
             }.get()
         } catch (error: Exception) {
             Log.w(TAG, "GLES RAW fusion unavailable; using CPU fallback", error)
-            persistentSession?.close()
-            persistentSession = null
-            persistentKey = null
+            resetSessionOnGpuThread()
             null
         } catch (error: LinkageError) {
             Log.w(TAG, "GLES RAW fusion linkage unavailable; using CPU fallback", error)
-            persistentSession?.close()
-            persistentSession = null
-            persistentKey = null
+            resetSessionOnGpuThread()
             null
+        }
+    }
+
+    private fun resetSessionOnGpuThread() {
+        runCatching {
+            gpuExecutor.submit<Unit> {
+                persistentSession?.close()
+                persistentSession = null
+                persistentKey = null
+            }.get()
         }
     }
 
