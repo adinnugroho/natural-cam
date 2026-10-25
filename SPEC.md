@@ -3320,6 +3320,17 @@ when CameraX cannot complete the requested frame set. The saved RAW companion re
 reference frame and the final JPEG may be the bracket-fused result. Any capture, GPU, or fusion
 fallback is reported as a limitation.
 
+The internal GPU renderer is opt-in during validation:
+
+* Gradle property `gpuPipelineExperimental=true` enables it in debug builds;
+* the current end-to-end contract is PURE RAW with AsShotNeutral and a valid camera matrix;
+* RAW normalization, lens shading, demosaic, calibration, residual WB reduction, clipped-highlight
+  neutralization, gamut clamp, and sRGB output remain GPU-resident until the final 8-bit readback;
+* CPU JPEG encoding, physical rotation, and aspect crop remain unchanged;
+* NATURAL remains on the CPU reference until its adaptive denoise and style stages have equivalent
+  GPU implementations;
+* the default build keeps the CPU reference path.
+
 ---
 
 # 134. AI Processing

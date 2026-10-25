@@ -4,6 +4,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val experimentalGpuPipeline = providers.gradleProperty("gpuPipelineExperimental")
+    .map { it.equals("true", ignoreCase = true) }
+    .orElse(false)
 android {
     namespace = "com.adin.naturalcam"
     compileSdk = 36
@@ -14,6 +17,8 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        // Internal only: keep the CPU reference default until GPU output passes device A/B checks.
+        buildConfigField("boolean", "EXPERIMENTAL_GPU_PIPELINE", experimentalGpuPipeline.get().toString())
     }
 
     buildTypes {

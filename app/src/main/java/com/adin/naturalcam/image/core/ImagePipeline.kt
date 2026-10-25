@@ -1,5 +1,6 @@
 package com.adin.naturalcam.image.core
 
+import com.adin.naturalcam.BuildConfig
 import com.adin.naturalcam.domain.ProcessingProfile
 import com.adin.naturalcam.image.processing.AspectCropper
 import com.adin.naturalcam.image.processing.ColorTransformStage
@@ -20,6 +21,7 @@ import com.adin.naturalcam.image.processing.WhiteBalanceStage
 import com.adin.naturalcam.image.raw.ColorMatrixFactory
 import com.adin.naturalcam.image.raw.Demosaicer
 import com.adin.naturalcam.image.raw.LensShadingCorrector
+import com.adin.naturalcam.image.raw.GlesRawPurePipeline
 import com.adin.naturalcam.image.raw.RawNormalizer
 import com.adin.naturalcam.image.style.StyleEngine
 import com.adin.naturalcam.image.yuv.YuvToRgbConverter
@@ -68,6 +70,24 @@ class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
         config: ProcessingConfiguration,
         timings: ProcessingTimings?,
     ): EncodedImage {
+        if (config.profile == ProcessingProfile.PURE && BuildConfig.EXPERIMENTAL_GPU_PIPELINE) {
+            val gpu = timings.measureStage("gpuPipeline") {
+                GlesRawPurePipeline.tryRender(raw)
+            }
+            if (gpu != null) {
+                timings?.fact("gpuPipelineBackend", "gles3-pure")
+                val rotated = timings.measureStage("rotate") {
+                    ImageRotation.rotate(gpu.argb, gpu.width, gpu.height, raw.metadata.orientationDegrees)
+                }
+                val cropped = timings.measureStage("crop") {
+                    AspectCropper.crop(rotated.argb, rotated.width, rotated.height, config.outputAspect)
+                }
+                return timings.measureStage("encode") {
+                    encoder.encode(cropped.argb, cropped.width, cropped.height, config.jpegQuality)
+                }
+            }
+            timings?.fact("gpuPipelineBackend", "cpu-reference")
+        }
         var bayer: BayerImage? = null
         timings.measureStage("normalize") { bayer = RawNormalizer.normalize(raw) }
         // Lens-shading colour correction first: the GainMap is per CFA position and
