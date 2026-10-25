@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -28,6 +29,7 @@ import com.adin.naturalcam.domain.ProcessingProfile
 import com.adin.naturalcam.domain.RawMode
 import com.adin.naturalcam.image.encoding.AndroidJpegEncoder
 import com.adin.naturalcam.image.core.DefaultImagePipeline
+import com.adin.naturalcam.image.raw.GlesCapabilityProbe
 import com.adin.naturalcam.location.AndroidLocationProvider
 import com.adin.naturalcam.settings.SettingsRepository
 import com.adin.naturalcam.storage.LatestPhotoReader
@@ -83,6 +85,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        if (BuildConfig.DEBUG) {
+            lifecycleScope.launch(Dispatchers.Default) {
+                GlesCapabilityProbe.run()
+            }
+        }
+
         val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
         if (granted) {
@@ -132,6 +140,7 @@ private fun CameraApp(viewModel: CameraViewModel) {
         object : SettingsActions {
             override fun onSetProfile(profile: ProcessingProfile) = viewModel.onSelectProfile(profile)
             override fun onSetRawMode(rawMode: RawMode) = viewModel.onSetRawMode(rawMode)
+            override fun onSetHdrBracketEnabled(enabled: Boolean) = viewModel.onSetHdrBracketEnabled(enabled)
             override fun onSetTimerSeconds(seconds: Int) = viewModel.onSetTimerSeconds(seconds)
             override fun onSetAspectRatio(aspectRatio: AspectRatio) = viewModel.onSetAspectRatio(aspectRatio)
             override fun onSetGeotagging(enabled: Boolean) = viewModel.onSetGeotagging(enabled)

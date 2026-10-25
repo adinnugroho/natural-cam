@@ -6,6 +6,7 @@ import com.adin.naturalcam.domain.EdgeMode
 import com.adin.naturalcam.domain.NoiseReductionMode
 import com.adin.naturalcam.domain.PipelineType
 import com.adin.naturalcam.domain.ProcessingProfile
+import com.adin.naturalcam.domain.RawFrameStrategy
 import com.adin.naturalcam.domain.RawMode
 import com.adin.naturalcam.testing.testCapabilities
 import org.junit.Assert.assertEquals
@@ -21,6 +22,22 @@ class CapturePathResolverTest {
         assertEquals(CaptureSource.RAW_SENSOR, plan.source)
         assertEquals(PipelineType.RAW_NATURAL, plan.pipeline)
         assertFalse(plan.saveRaw)
+        assertEquals(3, plan.rawFrameCount)
+        assertEquals(RawFrameStrategy.MFNR, plan.rawFrameStrategy)
+    }
+
+    @Test
+    fun `natural HDR bracket uses three RAW frames when exposure compensation is available`() {
+        val plan = CapturePathResolver.resolve(
+            capabilities = testCapabilities(raw = true),
+            profile = ProcessingProfile.NATURAL,
+            rawMode = RawMode.FINAL_ONLY,
+            hdrBracketEnabled = true,
+        )
+
+        assertEquals(3, plan.rawFrameCount)
+        assertEquals(RawFrameStrategy.HDR_BRACKET, plan.rawFrameStrategy)
+        assertFalse(CaptureLimitation.HDR_BRACKET_FALLBACK in plan.limitations)
     }
 
     @Test
@@ -119,5 +136,6 @@ class CapturePathResolverTest {
     fun `raw-only mode sets save raw`() {
         val plan = CapturePathResolver.resolve(testCapabilities(raw = true), ProcessingProfile.NATURAL, RawMode.RAW_ONLY)
         assertTrue(plan.saveRaw)
+        assertEquals(1, plan.rawFrameCount)
     }
 }

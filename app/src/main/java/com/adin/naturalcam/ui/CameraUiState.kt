@@ -16,11 +16,13 @@ import com.adin.naturalcam.domain.StyleState
 data class CameraUiState(
     val cameraState: CameraState = CameraState.Uninitialized,
     val captureState: CaptureState = CaptureState.Idle,
+    val previewJpeg: ByteArray? = null,
     val lenses: List<LensOption> = emptyList(),
     val selectedCameraId: CameraId? = null,
     val capabilities: CameraCapabilities? = null,
     val profile: ProcessingProfile = ProcessingProfile.NATURAL,
     val rawMode: RawMode = RawMode.FINAL_ONLY,
+    val hdrBracketEnabled: Boolean = false,
     val flashMode: FlashMode = FlashMode.OFF,
     val exposureCompensationEv: Float = 0f,
     /**
@@ -58,6 +60,7 @@ interface CameraActions {
     fun onSetTemperature(temperature: Float)
     fun onSetStyle(style: StyleState)
     fun onSetRawMode(rawMode: RawMode)
+    fun onSetHdrBracketEnabled(enabled: Boolean)
     fun onSelectStylePreset(style: StyleState)
     /** Opens/closes the style workspace (used by the entry button and system back). */
     fun onSetStyleMode(enabled: Boolean)

@@ -81,6 +81,7 @@ class CameraViewModel(
                 _uiState.update {
                     it.copy(
                         captureState = captureState,
+                        previewJpeg = (captureState as? CaptureState.Processing)?.previewJpeg,
                         lastCapture = (captureState as? CaptureState.Complete)?.result ?: it.lastCapture,
                         notice = (captureState as? CaptureState.Failed)?.let { failed ->
                             UiNotice(message = failed.error.detail ?: failed.error.toString(), isError = true)
@@ -109,6 +110,7 @@ class CameraViewModel(
                     it.copy(
                         profile = settings.profile,
                         rawMode = settings.rawMode,
+                        hdrBracketEnabled = settings.hdrBracketEnabled,
                         flashMode = settings.flashMode,
                         aspectRatio = settings.aspectRatio,
                         highestResolution = settings.highestResolution,
@@ -118,7 +120,7 @@ class CameraViewModel(
                         style = settings.style,
                     )
                 }
-            }
+        }
         }
         viewModelScope.launch(Dispatchers.IO) {
             latestPhotoReader.read()?.let { latest ->
@@ -227,6 +229,7 @@ class CameraViewModel(
                 aspectRatio = state.aspectRatio,
                 zoomRatio = controller.zoomRatio,
                 temperature = state.temperature,
+                hdrBracketEnabled = state.hdrBracketEnabled,
                 style = state.style,
                 outputSettings = OutputSettings(locationTagging = geotaggingEnabled),
             )
@@ -348,6 +351,10 @@ class CameraViewModel(
 
     override fun onSetRawMode(rawMode: RawMode) {
         viewModelScope.launch { settingsRepository.setRawMode(rawMode) }
+    }
+
+    override fun onSetHdrBracketEnabled(enabled: Boolean) {
+        viewModelScope.launch { settingsRepository.setHdrBracketEnabled(enabled) }
     }
 
     fun onSetTimerSeconds(seconds: Int) {

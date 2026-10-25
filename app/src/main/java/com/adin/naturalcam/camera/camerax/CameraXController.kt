@@ -30,11 +30,14 @@ import com.adin.naturalcam.domain.IspConfiguration
 import com.adin.naturalcam.domain.LensOption
 import com.adin.naturalcam.domain.NormalizedPoint
 import com.adin.naturalcam.domain.PhotoCaptureRequest
+import com.adin.naturalcam.domain.RawFrameStrategy
 import com.adin.naturalcam.domain.RawMode
 import com.adin.naturalcam.domain.ProcessingProfile
 import com.adin.naturalcam.image.core.YuvImage
 import com.adin.naturalcam.storage.FileNaming
 import com.adin.naturalcam.storage.StoragePaths
+import kotlin.coroutines.cancellation.CancellationException
+
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -62,6 +65,7 @@ class CameraXController(
     private val lifecycleOwner: androidx.lifecycle.LifecycleOwner,
     private val capturesDir: File = StoragePaths.captureCacheDir(context),
 ) : CameraController {
+    private val camera2RawBurst = Camera2RawBurstCapture(context, capturesDir)
 
     private val mainExecutor = androidx.core.content.ContextCompat.getMainExecutor(context)
     private val analysisExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "yuv-analysis") }
@@ -426,17 +430,18 @@ class CameraXController(
      * save routing; [wantedOutputFormat] derives the stream it needs.
      */
     private fun wantsHalJpeg(request: PhotoCaptureRequest): Boolean =
-        request.rawMode == RawMode.RAW_AND_FINAL && request.profile == ProcessingProfile.SYSTEM
+        request.rawMode != RawMode.RAW_ONLY &&
+            (request.profile == ProcessingProfile.SYSTEM ||
+                request.profile == ProcessingProfile.NATURAL)
 
     /**
      * Stream format for a plan; the only place this decision is made.
      *
-     * [wantsHalJpeg] is what SYSTEM's RAW_AND_FINAL output needs, because the platform JPEG
-     * *is* its final image. RAW-only output wants no JPEG at all, so it binds a plain RAW
-     * stream even though [CapturePlan.saveRaw] is set.
+     * NATURAL uses a temporary HAL JPEG as the immediate preview while the RAW result
+     * develops. It is never the saved NATURAL final. RAW-only output remains RAW-only.
      */
     private fun wantedOutputFormat(plan: CapturePlan, request: PhotoCaptureRequest): Int = when {
-        plan.source == CaptureSource.RAW_SENSOR && plan.saveRaw && wantsHalJpeg(request) ->
+        plan.source == CaptureSource.RAW_SENSOR && wantsHalJpeg(request) ->
             ImageCapture.OUTPUT_FORMAT_RAW_JPEG
         plan.source == CaptureSource.RAW_SENSOR -> ImageCapture.OUTPUT_FORMAT_RAW
         wantsHalJpeg(request) -> ImageCapture.OUTPUT_FORMAT_RAW_JPEG
@@ -445,36 +450,186 @@ class CameraXController(
     }
 
     private suspend fun captureRaw(request: PhotoCaptureRequest, plan: CapturePlan): CapturedFrames {
-        capturesDir.mkdirs()
-        val dngFile = File(capturesDir, FileNaming.tempName(request.captureId.value, ".dng"))
-        val jpegStream = if (wantsHalJpeg(request)) ByteArrayOutputStream() else null
+        val requestedFrames = plan.rawFrameCount.coerceIn(1, 3)
+        return try {
+            if (requestedFrames > 1) {
+                // Keep CameraX bound so the preview surface remains live during a burst.
+                // Camera2 is the compatibility fallback for devices whose CameraX RAW
+                // burst cannot satisfy the request.
+                try {
+                    captureRawFrames(request, requestedFrames, plan.rawFrameStrategy)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (cameraXError: Exception) {
+                    Log.w(
+                        TAG,
+                        "capture ${request.captureId.value} CameraX RAW burst failed; retrying Camera2",
+                        cameraXError,
+                    )
+                    captureRawCamera2(request, plan)
+                }
+            } else {
+                captureRawFrames(request, requestedFrames, plan.rawFrameStrategy)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (requestedFrames == 1) throw e
+            Log.w(
+                TAG,
+                "capture ${request.captureId.value} RAW burst failed; retrying one frame",
+                e,
+            )
+            captureRawFrames(request, 1, RawFrameStrategy.SINGLE).let { fallback ->
+                CapturedFrames(
+                    captureId = fallback.captureId,
+                    metadata = fallback.metadata,
+                    rawDngFiles = fallback.rawDngFiles,
+                    yuv = fallback.yuv,
+                    jpegBytes = fallback.jpegBytes,
+                    halJpegBytes = fallback.halJpegBytes,
+                    limitations = setOf(com.adin.naturalcam.domain.CaptureLimitation.MULTI_FRAME_FALLBACK),
+                )
+            }
+        }
+    }
+
+    private suspend fun captureRawCamera2(
+        request: PhotoCaptureRequest,
+        plan: CapturePlan,
+    ): CapturedFrames {
+        val provider = this.provider
+            ?: throw CameraException(CameraError.CameraUnavailable("camera provider missing"))
+        val cameraId = selected ?: request.cameraId
+        val capabilities = capabilitiesSnapshot[cameraId]
+            ?: throw CameraException(CameraError.CameraUnavailable("unknown camera ${cameraId.value}"))
+        val rawSize = capabilities.resolutions[com.adin.naturalcam.domain.CaptureFormat.RAW_SENSOR]
+            ?.maxByOrNull { it.width * it.height }
+            ?: throw CameraException(CameraError.CaptureFailed("RAW size unavailable"))
+        val jpegSize = capabilities.resolutions[com.adin.naturalcam.domain.CaptureFormat.JPEG]
+            ?.maxByOrNull { it.width * it.height }
+            ?: throw CameraException(CameraError.CaptureFailed("JPEG size unavailable"))
+        val keepAnalysis = analysisBound
+        provider.unbindAll()
+        preview = null
+        imageCapture = null
+        imageAnalysis = null
+        camera = null
+        try {
+            val baseExposureEv = requestedExposureEv +
+                if (request.profile == ProcessingProfile.NATURAL) NATURAL_CAPTURE_BIAS_EV else 0f
+            val offsets = if (plan.rawFrameStrategy == RawFrameStrategy.HDR_BRACKET) {
+                HDR_BRACKET_OFFSETS_EV
+            } else {
+                floatArrayOf(0f, 0f, 0f)
+            }
+            val result = camera2RawBurst.capture(
+                cameraId = cameraId.value,
+                captureId = request.captureId.value,
+                frameCount = plan.rawFrameCount.coerceIn(1, 3),
+                rawSize = android.util.Size(rawSize.width, rawSize.height),
+                jpegSize = android.util.Size(jpegSize.width, jpegSize.height),
+                exposureCompensationEv = baseExposureEv,
+                bracketOffsetsEv = offsets,
+                rotation = currentRotationDegrees(),
+            )
+            return CapturedFrames(
+                captureId = request.captureId,
+                metadata = baselineMetadata(request, currentRotationDegrees()),
+                rawDngFiles = result.dngFiles,
+                yuv = null,
+                jpegBytes = null,
+                halJpegBytes = result.previewJpeg,
+                rawImages = result.rawImages,
+            )
+        } finally {
+            bindMutex.withLock {
+                captureFormat = wantedOutputFormat(plan, request)
+                rebind(cameraId, keepAnalysis = keepAnalysis)
+            }
+        }
+    }
+
+    private suspend fun captureRawFrames(
+        request: PhotoCaptureRequest,
+        frameCount: Int,
+        strategy: RawFrameStrategy,
+    ): CapturedFrames {
+        val dngFiles = mutableListOf<File>()
+        val wantsJpeg = wantsHalJpeg(request)
         val rotation = currentRotationDegrees()
+        val baseExposureEv = requestedExposureEv +
+            if (request.profile == ProcessingProfile.NATURAL) NATURAL_CAPTURE_BIAS_EV else 0f
+        val jpegFrameIndex = if (strategy == RawFrameStrategy.HDR_BRACKET && frameCount > 1) 1 else 0
+        var previewJpegBytes: ByteArray? = null
+        try {
+            repeat(frameCount) { index ->
+                if (strategy == RawFrameStrategy.HDR_BRACKET) {
+                    applyExposureCompensation(
+                        baseExposureEv + HDR_BRACKET_OFFSETS_EV[index.coerceIn(0, HDR_BRACKET_OFFSETS_EV.lastIndex)],
+                    )
+                }
+                val suffix = if (frameCount == 1) "" else "-$index"
+                val dngFile = File(
+                    capturesDir,
+                    FileNaming.tempName("${request.captureId.value}$suffix", ".dng"),
+                )
+                dngFiles += dngFile
+                val frameJpeg = if (wantsJpeg) ByteArrayOutputStream() else null
+                captureRawFile(request, dngFile, frameJpeg)
+                if (index == jpegFrameIndex) previewJpegBytes = frameJpeg?.toByteArray()
+            }
+            return CapturedFrames(
+                captureId = request.captureId,
+                metadata = baselineMetadata(request, rotation),
+                rawDngFiles = dngFiles,
+                yuv = null,
+                jpegBytes = null,
+                halJpegBytes = previewJpegBytes,
+            )
+        } catch (e: CancellationException) {
+            dngFiles.forEach(File::delete)
+            throw e
+        } catch (e: Exception) {
+            dngFiles.forEach(File::delete)
+            throw e
+        } finally {
+            if (strategy == RawFrameStrategy.HDR_BRACKET) {
+                applyExposureCompensation(baseExposureEv)
+            }
+        }
+    }
+
+    private suspend fun captureRawFile(
+        request: PhotoCaptureRequest,
+        dngFile: File,
+        jpegStream: ByteArrayOutputStream?,
+    ) {
         val capture = imageCapture
             ?: throw CameraException(CameraError.CameraUnavailable("capture use case missing"))
-
         val rawOptions = ImageCapture.OutputFileOptions.Builder(dngFile).build()
         val jpegOptions = jpegStream?.let { ImageCapture.OutputFileOptions.Builder(it).build() }
-
         Log.d(TAG, "capture ${request.captureId.value} raw takePicture fmt=$captureFormat -> ${dngFile.name}")
+
         suspendCancellableCoroutine { cont ->
-            // A capture timeout or screen teardown cancels this continuation; the temp DNG
-            // must not outlive the capture (AGENTS 51).
             cont.invokeOnCancellation { dngFile.delete() }
             val savedFlags = java.util.concurrent.atomic.AtomicInteger(0)
             val expected = if (jpegOptions != null) 2 else 1
             val callback = object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                    Log.d(TAG, "capture ${request.captureId.value} raw saved bytes=${dngFile.length()} results=${savedFlags.get()}")
+                    val results = savedFlags.incrementAndGet()
                     val ready = dngFile.length() > 0 && (jpegStream == null || jpegStream.size() > 0)
-                    if (savedFlags.incrementAndGet() >= expected || ready) {
-                        if (cont.isActive) cont.resume(savedFlags.get())
+                    if ((ready || results >= expected) && cont.isActive) {
+                        cont.resume(Unit)
                     }
                 }
 
                 override fun onError(exception: ImageCaptureException) {
                     Log.e(TAG, "capture ${request.captureId.value} raw error: $exception")
                     dngFile.delete()
-                    if (cont.isActive) cont.resumeWithException(CameraException(mapCaptureException(exception)))
+                    if (cont.isActive) {
+                        cont.resumeWithException(CameraException(mapCaptureException(exception)))
+                    }
                 }
             }
             try {
@@ -487,15 +642,6 @@ class CameraXController(
                 if (cont.isActive) cont.resumeWithException(CameraException(mapException(e)))
             }
         }
-
-        return CapturedFrames(
-            captureId = request.captureId,
-            metadata = baselineMetadata(request, rotation),
-            rawDngFile = dngFile,
-            yuv = null,
-            jpegBytes = null,
-            halJpegBytes = jpegStream?.toByteArray(),
-        )
     }
 
     private val TAG = "NaturalCam"
@@ -528,7 +674,7 @@ class CameraXController(
         return CapturedFrames(
             captureId = request.captureId,
             metadata = baselineMetadata(request, rotation),
-            rawDngFile = null,
+            rawDngFiles = emptyList(),
             yuv = null,
             jpegBytes = stream.toByteArray(),
             halJpegBytes = null,
@@ -563,7 +709,7 @@ class CameraXController(
             return CapturedFrames(
                 captureId = request.captureId,
                 metadata = baselineMetadata(request, rotation),
-                rawDngFile = null,
+                rawDngFiles = emptyList(),
                 yuv = yuv,
                 jpegBytes = null,
                 halJpegBytes = null,
@@ -653,3 +799,5 @@ class CameraXController(
 
 /** Capture-side NATURAL bias selected to protect highlights after device validation. */
 private const val NATURAL_CAPTURE_BIAS_EV = -0.3f
+/** Short / normal / long bracket offsets; final rendering remains globally restrained. */
+private val HDR_BRACKET_OFFSETS_EV = floatArrayOf(-2f, 0f, 2f)

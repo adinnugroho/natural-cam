@@ -1,6 +1,7 @@
 package com.adin.naturalcam.ui
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
@@ -70,6 +71,11 @@ fun CameraScreen(
         state.captureState is CaptureState.Saving
     val shutterScale = remember { Animatable(1f) }
     val screenFlash = remember { Animatable(0f) }
+    val capturePreview = remember(state.previewJpeg) {
+        state.previewJpeg
+            ?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+            ?.asImageBitmap()
+    }
     var popup by remember { mutableStateOf<CameraPopup?>(null) }
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
     var frozenLensFrame by remember { mutableStateOf<ImageBitmap?>(null) }
@@ -151,6 +157,15 @@ fun CameraScreen(
                     .padding(horizontal = 14.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                capturePreview?.let { preview ->
+                    Image(
+                        bitmap = preview,
+                        contentDescription = "Quick capture preview",
+                        modifier = Modifier.size(40.dp),
+                        contentScale = ContentScale.Crop,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
                 CircularProgressIndicator(
                     color = CameraOrange,
                     modifier = Modifier.size(16.dp),

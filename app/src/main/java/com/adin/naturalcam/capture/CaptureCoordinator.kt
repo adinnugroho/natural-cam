@@ -1,5 +1,6 @@
 package com.adin.naturalcam.capture
 
+import android.graphics.BitmapFactory
 import android.os.SystemClock
 import android.util.Log
 
@@ -9,12 +10,14 @@ import com.adin.naturalcam.camera.CameraException
 import com.adin.naturalcam.camera.CapturedFrames
 import com.adin.naturalcam.camera.toCameraError
 import com.adin.naturalcam.domain.CameraError
+import com.adin.naturalcam.domain.CaptureLimitation
 import com.adin.naturalcam.domain.CaptureMetadata
 import com.adin.naturalcam.domain.CapturePlan
 import com.adin.naturalcam.domain.CaptureState
 import com.adin.naturalcam.domain.PhotoCaptureRequest
 import com.adin.naturalcam.domain.PhotoCaptureResult
 import com.adin.naturalcam.domain.ProcessingProfile
+import com.adin.naturalcam.domain.RawFrameStrategy
 import com.adin.naturalcam.domain.RawMode
 import com.adin.naturalcam.domain.SavedPhoto
 import com.adin.naturalcam.image.core.EncodedImage
@@ -25,8 +28,11 @@ import com.adin.naturalcam.image.core.RawImage
 import com.adin.naturalcam.image.core.RgbGains
 import com.adin.naturalcam.image.raw.ColorMatrixFactory
 import com.adin.naturalcam.image.raw.DngReader
-import com.adin.naturalcam.location.LocationProvider
+import com.adin.naturalcam.image.raw.GlesRawBurstFusion
+import com.adin.naturalcam.image.raw.RawBracketFusion
+import com.adin.naturalcam.image.raw.RawBurstFusion
 import com.adin.naturalcam.resolve.CapturePathResolver
+import com.adin.naturalcam.location.LocationProvider
 import com.adin.naturalcam.storage.FileNaming
 import com.adin.naturalcam.storage.MediaStoreWriter
 import kotlinx.coroutines.CoroutineDispatcher
@@ -40,6 +46,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.ByteArrayOutputStream
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
@@ -100,13 +107,20 @@ class CaptureCoordinator(
             if (capabilities == null) {
                 return fail(request, CameraError.CameraUnavailable("unknown camera ${request.cameraId.value}"))
             }
-            val plan = CapturePathResolver.resolve(capabilities, request.profile, request.rawMode, request.zoomRatio)
+            val plan = CapturePathResolver.resolve(
+                capabilities = capabilities,
+                profile = request.profile,
+                rawMode = request.rawMode,
+                zoomRatio = request.zoomRatio,
+                hdrBracketEnabled = request.hdrBracketEnabled,
+            )
             // SPEC 109 debug facts: identity, plan, profile, pipeline — never pixels or GPS (AGENTS 55).
             Log.d(
                 TAG,
                 "capture ${request.captureId.value} camera=${request.cameraId.value} profile=${request.profile} " +
                     "rawMode=${request.rawMode} zoom=${request.zoomRatio} aspect=${request.aspectRatio} " +
                     "plan=${plan.source}/${plan.pipeline} saveRaw=${plan.saveRaw} " +
+                    "rawFrames=${plan.rawFrameCount} strategy=${plan.rawFrameStrategy} " +
                     "limitations=${plan.limitations}",
             )
 
@@ -123,7 +137,10 @@ class CaptureCoordinator(
             }
             val captureMs = SystemClock.elapsedRealtime() - captureStart
 
-            _captureState.value = CaptureState.Processing(null)
+            val previewJpeg = withContext(processingDispatcher) {
+                createQuickPreview(frames.halJpegBytes)
+            }
+            _captureState.value = CaptureState.Processing(null, previewJpeg)
             val processStart = SystemClock.elapsedRealtime()
             val result = try {
                 // Bounds cooperative waits (MediaStore I/O) and the wait for a free develop
@@ -141,10 +158,8 @@ class CaptureCoordinator(
             } catch (e: Exception) {
                 return fail(request, e.toCaptureError())
             } finally {
-                // Single owner for the temp RAW: the processing timeout, a cancellation
-                // while waiting for the develop gate, and the refused-capture path never
-                // enter processRawCapture, so nothing else would delete it (AGENTS 51).
-                frames.rawDngFile?.delete()
+                // Single owner for temp RAW files; every burst file is deleted after processing.
+                frames.rawDngFiles.forEach { it.delete() }
             }
             val processMs = SystemClock.elapsedRealtime() - processStart
             Log.d(
@@ -181,7 +196,7 @@ class CaptureCoordinator(
             request.style,
             request.aspectRatio,
         )
-        val limitations = plan.limitations
+        val limitations = plan.limitations + frames.limitations
         // Developed JPEGs are physically rotated and HAL JPEGs arrive rotated by
         // the platform, so EXIF orientation is normal for every final JPEG (SPEC 89).
         val jpegMetadata = metadata.copy(orientationDegrees = 0)
@@ -189,7 +204,8 @@ class CaptureCoordinator(
         val timings = if (BuildConfig.DEBUG) ProcessingTimings() else null
 
         val result = when {
-            frames.rawDngFile != null -> processRawCapture(request, plan, frames, metadata, config, timings)
+            frames.rawDngFiles.isNotEmpty() ->
+                processRawCapture(request, plan, frames, metadata, config, limitations, timings)
             frames.yuv != null -> {
                 if (BuildConfig.DEBUG && request.profile == ProcessingProfile.NATURAL) {
                     Log.d(
@@ -232,17 +248,24 @@ class CaptureCoordinator(
         frames: CapturedFrames,
         metadata: CaptureMetadata,
         config: ProcessingConfiguration,
+        limitations: Set<CaptureLimitation>,
         timings: ProcessingTimings? = null,
     ): PhotoCaptureResult {
-        val dngFile = frames.rawDngFile!!
-        _captureState.value = CaptureState.Saving
+        val dngFile = frames.rawDngFiles.firstOrNull()
+            ?: throw CameraException(CameraError.ProcessingFailed("RAW capture returned no DNG"))
 
         // One capture clock for both names so the RAW/JPEG pair shares its base
         // identifier (SPEC 86); EXIF keeps the DNG's own timestamp.
         val nameTimestamp = metadata.timestampMs
+        val rawCompanionLimitations = if (frames.rawDngFiles.size > 1 && plan.saveRaw) {
+            limitations + CaptureLimitation.RAW_COMPANION_NOT_FUSED
+        } else {
+            limitations
+        }
 
-        // RAW survives even if later processing fails (SPEC 105): save first.
+        // RAW survives even if later processing fails (SPEC 105): save the reference frame first.
         val rawPhoto = if (plan.saveRaw) {
+            _captureState.value = CaptureState.Saving
             mediaStore.saveDng(dngFile, FileNaming.dngName(nameTimestamp), metadata)
                 ?: throw CameraException(CameraError.StorageFailed("MediaStore rejected the DNG write"))
         } else {
@@ -252,19 +275,35 @@ class CaptureCoordinator(
         if (request.rawMode == RawMode.RAW_ONLY) {
             // The DNG itself carries the authoritative capture metadata; no decode needed.
             return PhotoCaptureResult(
-                null, rawPhoto, metadata, request.profile, config.pipelineVersion, plan.limitations,
+                null, rawPhoto, metadata, request.profile, config.pipelineVersion, rawCompanionLimitations,
             )
         }
 
         // Local decode so the debug timing wraps the same call the release path makes.
-        fun decodeDng(): RawImage = try {
-            DngReader.read(dngFile)
+        fun decodeDng(file: java.io.File): RawImage = try {
+            DngReader.read(file)
         } catch (e: DngReader.DngFormatException) {
             throw CameraException(CameraError.ProcessingFailed("DNG decode failed: ${e.message}"))
         }
         val decodeStart = SystemClock.elapsedRealtime()
-        val rawImage = decodeDng()
+        val decodedFrames = frames.rawImages.takeIf { it.isNotEmpty() } ?: frames.rawDngFiles.map(::decodeDng)
+        val fusion = if (plan.rawFrameStrategy == RawFrameStrategy.HDR_BRACKET) {
+            RawBracketFusion.fuse(decodedFrames)
+        } else {
+            GlesRawBurstFusion.tryFuse(decodedFrames) ?: RawBurstFusion.fuse(decodedFrames)
+        }
+        val rawImage = fusion.image
+        val processingLimitations = buildSet {
+            addAll(rawCompanionLimitations)
+            if (fusion.mergedFrameCount < decodedFrames.size) {
+                add(CaptureLimitation.MULTI_FRAME_FALLBACK)
+            }
+        }
         timings?.record("dngRead", SystemClock.elapsedRealtime() - decodeStart)
+        timings?.fact("rawDecodeSource", if (frames.rawImages.isNotEmpty()) "IMAGE_READER" else "DNG")
+        timings?.fact("rawFrameCount", decodedFrames.size.toString())
+        timings?.fact("rawMergedFrameCount", fusion.mergedFrameCount.toString())
+        timings?.fact("rawFusionBackend", fusion.backend)
 
         // RAW carries the authoritative capture metadata (AGENTS 52).
         val rawMeta = rawImage.metadata
@@ -283,8 +322,8 @@ class CaptureCoordinator(
             Log.d(
                 TAG,
                 "natural diagnostics capture=${request.captureId.value} camera=${request.cameraId.value} " +
-                    "source=RAW_SENSOR pipeline=${config.pipelineVersion} " +
-                    "wbSource=${if (rawMeta.asShotNeutral != null) "AsShotNeutral" else "fallback"} " +
+                    "source=RAW_SENSOR pipeline=${config.pipelineVersion} wbSource=" +
+                    "${if (rawMeta.asShotNeutral != null) "AsShotNeutral" else "fallback"} " +
                     "wbGains=${gains?.let { "${it.r},${it.g},${it.b}" } ?: "unknown"} " +
                     "inputColor=linear-sensor workingColor=linear-sRGB outputColor=sRGB " +
                     "black=${rawMeta.blackLevelPerChannel.joinToString(",")} white=${rawMeta.whiteLevel} " +
@@ -301,7 +340,9 @@ class CaptureCoordinator(
             val photo = saveFinalJpeg(
                 halJpeg, nameTimestamp, fullMetadata.copy(orientationDegrees = 0), request,
             )
-            return PhotoCaptureResult(photo, rawPhoto, fullMetadata, request.profile, config.pipelineVersion, plan.limitations)
+            return PhotoCaptureResult(
+                photo, rawPhoto, fullMetadata, request.profile, config.pipelineVersion, processingLimitations,
+            )
         }
 
         val processStart = SystemClock.elapsedRealtime()
@@ -310,7 +351,9 @@ class CaptureCoordinator(
         val photo = saveFinalJpeg(
             encoded.bytes, nameTimestamp, fullMetadata.copy(orientationDegrees = 0), request, timings,
         )
-        return PhotoCaptureResult(photo, rawPhoto, fullMetadata, request.profile, config.pipelineVersion, plan.limitations)
+        return PhotoCaptureResult(
+            photo, rawPhoto, fullMetadata, request.profile, config.pipelineVersion, processingLimitations,
+        )
     }
 
     /**
@@ -335,6 +378,28 @@ class CaptureCoordinator(
         )
         timings?.record("save", SystemClock.elapsedRealtime() - saveStart)
         return saved ?: throw CameraException(CameraError.StorageFailed("MediaStore rejected the JPEG write"))
+    }
+
+    private fun createQuickPreview(bytes: ByteArray?): ByteArray? {
+        if (bytes == null) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 1024) {
+            sample *= 2
+        }
+        val bitmap = BitmapFactory.decodeByteArray(
+            bytes,
+            0,
+            bytes.size,
+            BitmapFactory.Options().apply { inSampleSize = sample },
+        ) ?: return null
+        return ByteArrayOutputStream().use { output ->
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 82, output)
+            bitmap.recycle()
+            output.toByteArray()
+        }
     }
 
     private fun withLocation(

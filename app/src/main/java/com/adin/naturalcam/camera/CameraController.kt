@@ -5,13 +5,16 @@ import com.adin.naturalcam.domain.CameraCapabilities
 import com.adin.naturalcam.domain.CameraId
 import com.adin.naturalcam.domain.CameraState
 import com.adin.naturalcam.domain.CaptureId
+import com.adin.naturalcam.domain.CaptureLimitation
 import com.adin.naturalcam.domain.CaptureMetadata
 import com.adin.naturalcam.domain.CapturePlan
 import com.adin.naturalcam.domain.CaptureSource
 import com.adin.naturalcam.domain.LensOption
 import com.adin.naturalcam.domain.NormalizedPoint
 import com.adin.naturalcam.domain.PhotoCaptureRequest
+import com.adin.naturalcam.image.core.RawImage
 import com.adin.naturalcam.image.core.YuvImage
+
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 
@@ -22,18 +25,22 @@ import java.io.File
 class CapturedFrames(
     val captureId: CaptureId,
     val metadata: CaptureMetadata,
-    /** Temp DNG file when source is RAW_SENSOR; caller owns deletion (AGENTS 51). */
-    val rawDngFile: File?,
+    /** Temp DNG files when source is RAW_SENSOR; caller owns deletion (AGENTS 51). */
+    val rawDngFiles: List<File>,
     /** Decoded-planes YUV when source is YUV. */
     val yuv: YuvImage?,
     /** Platform-processed JPEG when source is PROCESSED_JPEG (or RAW+JPEG secondary). */
     val jpegBytes: ByteArray?,
     /** Secondary HAL JPEG present alongside RAW (SYSTEM + RAW_AND_FINAL only). */
     val halJpegBytes: ByteArray?,
+    /** Direct RAW frames decoded from ImageReader without a DNG readback; optional. */
+    val rawImages: List<RawImage> = emptyList(),
+    /** Limitations discovered by the backend after the plan was resolved. */
+    val limitations: Set<CaptureLimitation> = emptySet(),
 ) {
     val source: CaptureSource
         get() = when {
-            rawDngFile != null -> CaptureSource.RAW_SENSOR
+            rawDngFiles.isNotEmpty() || rawImages.isNotEmpty() -> CaptureSource.RAW_SENSOR
             yuv != null -> CaptureSource.YUV
             else -> CaptureSource.PROCESSED_JPEG
         }

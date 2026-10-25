@@ -26,6 +26,7 @@ class SettingsRepository(private val context: Context) {
         AppSettings(
             profile = p[KEY_PROFILE].enumOrNull<ProcessingProfile>() ?: ProcessingProfile.NATURAL,
             rawMode = p[KEY_RAW_MODE].enumOrNull<RawMode>() ?: RawMode.FINAL_ONLY,
+            hdrBracketEnabled = p[KEY_HDR_BRACKET] ?: false,
             flashMode = p[KEY_FLASH_MODE].enumOrNull<FlashMode>() ?: FlashMode.OFF,
             aspectRatio = p[KEY_ASPECT_RATIO].enumOrNull<AspectRatio>() ?: AspectRatio.RATIO_4_3,
             highestResolution = p[KEY_HIGHEST_RESOLUTION] ?: false,
@@ -40,6 +41,8 @@ class SettingsRepository(private val context: Context) {
     suspend fun setProfile(profile: ProcessingProfile) = set(KEY_PROFILE, profile.name)
 
     suspend fun setRawMode(rawMode: RawMode) = set(KEY_RAW_MODE, rawMode.name)
+
+    suspend fun setHdrBracketEnabled(enabled: Boolean) = set(KEY_HDR_BRACKET, enabled)
 
     suspend fun setFlashMode(flashMode: FlashMode) = set(KEY_FLASH_MODE, flashMode.name)
 
@@ -65,6 +68,7 @@ private inline fun <reified T : Enum<T>> String?.enumOrNull(): T? =
 
 private val KEY_PROFILE = stringPreferencesKey("profile")
 private val KEY_RAW_MODE = stringPreferencesKey("raw_mode")
+private val KEY_HDR_BRACKET = booleanPreferencesKey("hdr_bracket")
 private val KEY_FLASH_MODE = stringPreferencesKey("flash_mode")
 private val KEY_ASPECT_RATIO = stringPreferencesKey("aspect_ratio")
 private val KEY_HIGHEST_RESOLUTION = booleanPreferencesKey("highest_resolution")

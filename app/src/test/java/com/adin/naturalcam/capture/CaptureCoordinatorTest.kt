@@ -100,6 +100,7 @@ class CaptureCoordinatorTest {
         var failWith: Exception? = null
         var processedRaw = 0
         var processedYuv = 0
+        var lastRaw: RawImage? = null
 
         override fun processRaw(
             raw: RawImage,
@@ -108,6 +109,7 @@ class CaptureCoordinatorTest {
         ): EncodedImage {
             failWith?.let { throw it }
             processedRaw++
+            lastRaw = raw
             timings?.record("demosaic", 1)
             return EncodedImage(ByteArray(4) { 1 }, raw.width, raw.height)
         }
@@ -157,7 +159,7 @@ class CaptureCoordinatorTest {
     private fun yuvFrames(captureId: CaptureId) = CapturedFrames(
         captureId = captureId,
         metadata = baseline(captureId),
-        rawDngFile = null,
+        rawDngFiles = emptyList(),
         yuv = YuvImage(
             width = 4, height = 4,
             yPlane = ByteArray(16), yRowStride = 4, yPixelStride = 1,
@@ -171,7 +173,7 @@ class CaptureCoordinatorTest {
     private fun rawFrames(captureId: CaptureId, file: File) = CapturedFrames(
         captureId = captureId,
         metadata = baseline(captureId),
-        rawDngFile = file,
+        rawDngFiles = listOf(file),
         yuv = null,
         jpegBytes = null,
         halJpegBytes = null,
@@ -366,7 +368,7 @@ class CaptureCoordinatorTest {
 
         val dng = TestDngFactory.buildDng(CfaLayout.RGGB)
         controller.frames = rawFrames(CaptureId("test-capture"), dng).let {
-            CapturedFrames(it.captureId, it.metadata, it.rawDngFile, null, null, ByteArray(4) { 3 })
+            CapturedFrames(it.captureId, it.metadata, it.rawDngFiles, null, null, ByteArray(4) { 3 })
         }
 
         val result = coordinator.capture(request(rawMode = RawMode.RAW_AND_FINAL, profile = ProcessingProfile.SYSTEM))
@@ -391,6 +393,38 @@ class CaptureCoordinatorTest {
         assertEquals(1, pipeline.processedRaw)
         assertEquals(1, store.savedJpegs.size)
         assertEquals("temp DNG is not kept in FINAL_ONLY mode", 0, store.savedDngs.size)
+    }
+
+    @Test
+    fun `natural raw burst is fused before pipeline`() = runTest {
+        val controller = FakeController(mapOf(CameraId("0") to capabilities(raw = true)))
+        val pipeline = FakePipeline()
+        val store = FakeMediaStore()
+        val coordinator = CaptureCoordinator(
+            controller,
+            pipeline,
+            store,
+            processingDispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        val first = TestDngFactory.buildDng(CfaLayout.RGGB, pixelValue = 900)
+        val second = TestDngFactory.buildDng(CfaLayout.RGGB, pixelValue = 1100)
+        controller.frames = CapturedFrames(
+            captureId = CaptureId("test-capture"),
+            metadata = baseline(CaptureId("test-capture")),
+            rawDngFiles = listOf(first, second),
+            yuv = null,
+            jpegBytes = null,
+            halJpegBytes = null,
+        )
+
+        val result = coordinator.capture(request(rawMode = RawMode.FINAL_ONLY))
+
+        assertNotNull(result)
+        assertEquals(1, pipeline.processedRaw)
+        assertEquals(1000, pipeline.lastRaw!!.pixelData.first().toInt() and 0xffff)
+        assertTrue(result!!.limitations.contains(com.adin.naturalcam.domain.CaptureLimitation.MULTI_FRAME_FALLBACK).not())
+        assertEquals(1, store.savedJpegs.size)
     }
 
     @Test

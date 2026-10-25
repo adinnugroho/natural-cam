@@ -6,6 +6,8 @@ enum class ProcessingProfile { PURE, NATURAL, SYSTEM }
 /** RAW output modes (PRD 12). RAW is optional; normal usage does not require it. */
 enum class RawMode { FINAL_ONLY, RAW_AND_FINAL, RAW_ONLY }
 
+/** Capture strategy for optional multi-frame NATURAL RAW processing. */
+enum class RawFrameStrategy { SINGLE, MFNR, HDR_BRACKET }
 sealed interface ExposureMode {
     data object Auto : ExposureMode
     data class Manual(val iso: Int, val exposureTimeNs: Long) : ExposureMode
@@ -44,6 +46,9 @@ enum class CaptureLimitation {
     FALLBACK_TO_YUV,
     FALLBACK_TO_JPEG,
     RAW_NOT_AVAILABLE,
+    MULTI_FRAME_FALLBACK,
+    HDR_BRACKET_FALLBACK,
+    RAW_COMPANION_NOT_FUSED,
     PREVIEW_MAY_DIFFER,
 }
 
@@ -65,7 +70,11 @@ data class CapturePlan(
     val saveRaw: Boolean,
     val ispConfiguration: IspConfiguration,
     val limitations: Set<CaptureLimitation>,
+    /** Number of RAW files requested for the processing path. */
+    val rawFrameCount: Int = 1,
+    val rawFrameStrategy: RawFrameStrategy = RawFrameStrategy.SINGLE,
 )
+
 
 data class SavedPhoto(
     val uri: String,
@@ -108,6 +117,8 @@ data class PhotoCaptureRequest(
     val zoomRatio: Float = 1f,
     /** Normalized NATURAL white-balance temperature adjustment in [-1, 1]. */
     val temperature: Float = 0f,
+    /** Optional restrained short/normal/long RAW bracket for NATURAL. */
+    val hdrBracketEnabled: Boolean = false,
     /** Selected creative style; consumed by NATURAL only (STYLE_PLAN 27/28). */
     val style: StyleState = StyleState(),
     val outputSettings: OutputSettings,
@@ -127,7 +138,7 @@ sealed interface CaptureState {
     data object Idle : CaptureState
     data object Preparing : CaptureState
     data object Capturing : CaptureState
-    data class Processing(val progress: Float?) : CaptureState
+    data class Processing(val progress: Float?, val previewJpeg: ByteArray? = null) : CaptureState
     data object Saving : CaptureState
     data class Complete(val result: SavedPhoto) : CaptureState
     data class Failed(val error: CameraError) : CaptureState

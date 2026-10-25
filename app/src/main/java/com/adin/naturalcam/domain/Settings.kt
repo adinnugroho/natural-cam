@@ -9,6 +9,7 @@ enum class AspectRatio(val label: String) {
 data class AppSettings(
     val profile: ProcessingProfile = ProcessingProfile.NATURAL,
     val rawMode: RawMode = RawMode.FINAL_ONLY,
+    val hdrBracketEnabled: Boolean = false,
     val flashMode: FlashMode = FlashMode.OFF,
     val aspectRatio: AspectRatio = AspectRatio.RATIO_4_3,
     val highestResolution: Boolean = false,

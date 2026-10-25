@@ -39,6 +39,7 @@ import com.adin.naturalcam.ui.theme.cameraChoiceColors
 interface SettingsActions {
     fun onSetProfile(profile: ProcessingProfile)
     fun onSetRawMode(rawMode: RawMode)
+    fun onSetHdrBracketEnabled(enabled: Boolean)
     fun onSetTimerSeconds(seconds: Int)
     fun onSetAspectRatio(aspectRatio: AspectRatio)
     fun onSetGeotagging(enabled: Boolean)
@@ -84,6 +85,7 @@ fun SettingsScreen(
                         )
                     }
                 }
+                SettingToggle("HDR BRACKET", settings.hdrBracketEnabled, actions::onSetHdrBracketEnabled)
             }
             SettingsSection("PEMBIDIK") {
                 SettingLabel("RASIO")

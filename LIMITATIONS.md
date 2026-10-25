@@ -20,6 +20,9 @@ product decision. PRD intent is preserved via documented fallbacks (AGENTS 34).
 | 11 | The Style Tone pad has one contrast pivot (linear 0.18) and no toe, so a "strong contrast" style cannot darken the midtones without also clipping the deepest shadows: at pad X ≈ 0.45 everything below display 0.09 goes to black | `StyleEngine` applies a bounded `contrastK` about a fixed pivot; STYLE_PLAN §8.3's `contrastPivot` / `toeStrength` / `blackPointOffset` are not implemented, and the deepen term only acts above linear 0.30 | Implement a pivot/toe term in the tone stage (its own numeric tests + a `StyleVersion` bump), then let presets use it instead of leaning on the pivot |
 | 12 | The palette undertone can warm the **lower** tones only; there is no highlight tint, so a style cannot ask for warm highlights *and* cool shadows. Warm Street measured on device: deep-shadow R/B **+5%** (warmer), highlight-band R/B **−1%** (marginally cooler) — the inverse of FILM_STYLE's split-tone wish | `shadowHueTint` is weighted by `exp(-l·2)`, i.e. it peaks in the deep shadows (STYLE_PLAN §11 defines Undertone as shadows/lower midtones/midtones); `temperature` is chroma-weighted, not luma-weighted, and barely moves bright neutrals | Add a luma-weighted highlight-tint term next to the shadow one and re-read the palette Y axis as a real split-tone axis (bump `StyleVersion`) |
 | 13 | The developed JPEG's EXIF `DateTimeOriginal` is **not the capture's time**: five captures over 15 min (20:34, 20:36, 20:38, 20:39, 20:48) all carried `20:34:08`, and a later session's 22:04:14 capture carried `22:03:37` — the *previous* capture's time — while the file name and MediaStore `DATE_TAKEN` were correct per capture on every one | The save path passes the capture clock to the **name** (`nameTimestamp`) but writes the **EXIF** from the DNG-parsed `fullMetadata.timestampMs` (`DngReader` tag 36867/306, with a `System.currentTimeMillis()` fallback) — deliberately, per the code comment — and on this device that DNG tag does not advance with the capture (it lags by a frame, or freezes at the session's first shot) | Write the EXIF from the same capture clock as the name (one-line change at the two RAW-path `saveFinalJpeg` calls) or make `DngReader` reject a timestamp that predates the session — with a unit test on the tag→metadata path |
+| 14 | NATURAL RAW phase 1 captures up to three RAW files. Multi-frame capture keeps the CameraX preview bound; direct Camera2 RAW+JPEG burst capture is the compatibility fallback when CameraX cannot complete the burst | Camera2 stream/session combinations remain vendor-dependent. Any failed CameraX/direct burst falls back to a single RAW frame and records the limitation. The saved DNG remains the reference frame; the JPEG is the fused result | Expand device coverage, carry per-frame CaptureResult/gyro metadata into fusion, then add a fused-DNG writer |
+| 15 | Optional HDR bracket uses three sequential exposure roles; CameraX is primary to keep the viewfinder live, with direct Camera2 fallback, and it has no fused-DNG writer | The fallback backend uses exposure compensation rather than fully manual per-frame sensor controls | Add clipping-aware HDR weights and fused-DNG output after controlled real-scene A/B validation |
+| 16 | NATURAL RAW now shows a temporary downsampled HAL-JPEG preview while the RAW result develops; the preview is not the final NATURAL image | CameraX must bind RAW+JPEG and capture an extra processed JPEG; the app replaces the preview state when processing completes | Replace the temporary JPEG with a low-resolution RAW/GPU preview once the direct Camera2 path is available |
 
 ## Verification status
 
@@ -149,6 +152,39 @@ set or UI-test dependency, and image dimensions/CameraX behavior require real ha
 Not covered by this single-device pass: front-camera capture, multi-vendor behavior,
 human full-resolution image-quality review, and a long-run memory soak.
 
+### Phase 1 RAW MFNR device smoke — 2026-10-25
+
+| Field | Value |
+|---|---|
+| Device | Oppo CPH2737, Android 16, SDK 36 |
+| Build | `app-debug.apk` installed with `adb install -r` |
+| Capture | NATURAL, `JPG+RAW`, 4:3, one shutter press |
+| MFNR evidence | `rawFrameCount=3`, `rawMergedFrameCount=3`, no multi-frame fallback, pipeline `natural-v43` |
+| Timing | `captureMs=2213`, `processSaveMs=26421`, pipeline `14957ms` |
+| Output | MediaStore DNG `4096×3072` plus JPEG `3072×4096`; current photo visible in the gallery thumbnail |
+| Recovery | MainActivity stayed focused after processing; `cache/captures` was empty |
+
+Not covered: forced burst failure/single-frame fallback, multi-vendor behavior, and
+controlled image-quality A/B crops. The capture used sequential CameraX RAW files,
+not an atomic Camera2 `captureBurst`.
+
+### Phase 2 GPU RAW fusion device smoke — 2026-10-25
+
+| Field | Value |
+|---|---|
+| Device | Oppo CPH2737, Android 16, SDK 36 |
+| Capture | NATURAL, `JPG+RAW`, 4:3, one shutter press |
+| Fusion evidence | `rawFrameCount=3`, `rawMergedFrameCount=3`, `rawFusionBackend=gles3` |
+| EGL/GLES startup probe | Success: EGL 1.5, OpenGL ES 3.2, Mali-G615 MC6, max texture 16384 |
+| Direct GPU smoke | `fusionSmoke backend=gles3 merged=2` |
+| Timing | `captureMs=2559`, `processSaveMs=23812`, pipeline `natural-v43` |
+| Result | DNG/JPEG saved, camera returned to a usable preview, `cache/captures` empty |
+
+The direct probe exposed three defects: leading whitespace before `#version`, the
+reserved GLSL identifier `sample`, and a vertically flipped GPU readback that
+changed CFA row parity and produced magenta output. All were fixed. The real
+capture now activates GLES fusion successfully; CPU fallback remains available.
+
 ## Device-test checklist (AGENTS 59/80/81 — mandatory before calling camera work done)
 
 Status combined from the 2026-09-29 and 2026-10-08 sessions (Oppo CPH2737). Multi-vendor
@@ -165,6 +201,7 @@ coverage (AGENTS §60) and human image-quality review (AGENTS §61) remain open.
 - [x] Tap-to-focus works; the reticle appears at the tapped point, fades and disappears (2026-10-08, after fixing the alpha-layer bug); EV slider honors the device 1/3 step (SPEC §57)
 - [x] Flash OFF/AUTO/ON all switch and capture (2026-10-08). Dark-scene flash photo: same scene, mean luma 47.9 → **85.9 (+79%)** with flash ON, and near-white clipping *fell* 7.46% → 3.51% (the NATURAL shoulder absorbed the brighter frame). Note: the app writes no flash information — see limitation #9
 - [x] RAW toggle: RAW+JPEG pair shares base filename; RAW_ONLY produces only DNG. **2026-10-08 additions**: SYSTEM + JPG+RAW (dual RAW+JPEG stream) and SYSTEM + RAW-only both worked after the capture-routing fix
+- [x] **Phase 1 RAW MFNR (2026-10-25)**: one NATURAL `JPG+RAW` shutter on Oppo CPH2737 captured and merged 3 RAW frames (`rawFrameCount=3`, `rawMergedFrameCount=3`, `natural-v43`); DNG/JPEG saved and temp cache empty. Fallback/error path and controlled quality A/B remain untested
 - [x] Quick repeated shutters: capture refused cleanly when busy (AGENTS 42), no crashes observed
 - [x] App kill mid-processing (2026-10-08): a `force-stop` mid-develop leaves the temp DNG in `cache/captures` (expected — `finally` cannot run on SIGKILL); a fresh orphan survives the next launch, and a **2-day-old orphan is reclaimed by the startup cleaner** on the next launch (verified with a planted mtime). So the reclaim is the 24 h cleaner, not the launch itself
 - [x] Geotagging (2026-10-08): OFF → no GPS tags; ON + permission → `GPSLatitude`/`Ref`/`GPSLongitude`/`Ref` present and consistent with the device's cached fix
@@ -283,7 +320,11 @@ Measured on 2026-10-05: two captures of the *same static scene with identical se
 | 2026-10-25 | Remove the redundant `Full` aspect option and make `4:3` the full-resolution sensor mode. CameraX now requests `HIGHEST_AVAILABLE_STRATEGY` with the 4:3 strategy for the default 4:3 selection | On the tested 4:3 sensor, `Full` and `4:3` produced identical dimensions, so exposing both created a misleading choice | Camera UI / capture resolution | The picker now exposes only **4:3** and **16:9**; 4:3 remains the complete sensor frame at the largest available 4:3 stream | 16:9 remains aspect-constrained; devices may report different maximum dimensions | Oppo CPH2737 (`OP5F02L1`) |
 | 2026-10-25 | Stream DNG bytes directly from the temporary file into MediaStore instead of calling `readBytes()` first; EXIF dimensions are read from the same file | RAW+JPEG/RAW-only save previously allocated a second full DNG byte buffer (~25 MB on the Oppo) before storage | RAW outputs | Same DNG bytes and dimensions; lower peak heap during RAW saving. Post-refactor RAW+JPEG device smoke completed and `cache/captures` was empty | Storage still performs one file copy; this removes only the duplicate heap buffer | Oppo CPH2737 | Full unit suite passed; post-refactor NATURAL RAW storage completed with `natural-v42` |
 | 2026-10-25 | Replace hot-loop channel-array iteration in sharpening and bloom with fixed indexed selection | Avoid short-lived channel-array/iterator allocations without changing channel order or arithmetic | NATURAL + style | Same output expected; benchmark CRCs remained `natural=2845020766`, `styled=3399097577` | Desktop timings vary by run; no hard latency gain claimed from this mechanical pass | Dev JVM | `DevelopBenchTest` passed before/after |
-`natural-v42` and `pure-v2` are the current RAW pipeline versions.
+| 2026-10-25 | Add optional three-frame same-exposure RAW MFNR for NATURAL: sequential RAW capture, reduced green-proxy translation alignment, exposure-product normalization, compatible-frame rejection, CFA-domain averaging, and honest single-frame fallback. Bump the NATURAL pipeline version to `natural-v43` | PhotonCamera's useful Phase 1 benefit is temporal noise reduction; the existing RAW pipeline remains the renderer | NATURAL RAW | Same-exposure noise averages toward a cleaner sensor signal before the existing demosaic/color/tone stages | CameraX capture is sequential rather than atomic Camera2 burst; the saved RAW companion is the reference frame; CPU fusion adds memory/time; not real-device validated | JVM | `RawBurstFusionTest`, resolver tests, and coordinator integration test pass; device comparison pending |
+| 2026-10-25 | Move RAW MFNR proxy generation, 25-candidate translation scoring, and CFA accumulation into a GLES 3 backend; preserve the CPU implementation as the automatic fallback | Phase 2 targets the repeated full-frame proxy/alignment/merge work while keeping the tested numerical contract and device compatibility | GPU path activates on Oppo CPH2737 (`rawFusionBackend=gles3`); CPU remains the compatibility fallback | GPU memory and shader-driver compatibility vary by device; shader-source and row-orientation bugs required device smoke validation |
+| 2026-10-25 | Add optional Phase 3 HDR bracket setting: CameraX sequential RAW capture is primary so the preview remains live; direct Camera2 RAW+JPEG capture is the compatibility fallback, with middle-exposure reference, exposure normalization, and GLES fusion | Extend MFNR toward restrained dynamic-range improvement without changing NATURAL tone rendering | Device capture completed with `rawFusionBackend=hdr-gles3`, 3 merged frames, natural color, and no magenta regression | Sequential fallback, no fused-DNG writer, no continuous GPU rendering |
+| 2026-10-25 | Add immediate NATURAL RAW preview: capture a temporary HAL JPEG, downsample it off the main thread, publish it during `Processing`, then replace it with the final RAW-developed result | Full RAW development is still slow, but shutter feedback should not wait for demosaic/tone/encode | Device preview remained live during CameraX burst and processing; final JPEG pipeline remains authoritative and was saved to `Pictures/NaturalCamera` | Temporary preview is OEM-processed and not color-identical; it is not itself a gallery result |
+`natural-v43` and `pure-v2` are the current RAW pipeline versions.
 
 
 | 2026-10-08 | Device validation of Warm Street, **no tuning constant changed**: one JPG capture per style, then a `JPG+RAW` check, then an authoritative A/B on the *same* DNGs developed twice through the production pipeline (neutral pads against `warm_street`) | FILM_STYLE.md §VISUAL ACCEPTANCE asks for real-scene runs, and the RAW acceptance item needs a pair on device | NATURAL + style | Black point −15% (indoor) / −18% (dusk street) with midtones and highlights inside ±0.5%, chroma −3…−6%, all hue families inside 1°, deep-shadow R/B +5%; RAW pair untouched | The JVM A/B is the authority because room light drifted 25% between two device captures of the same style; the dusk scene clips 1.17% of the frame (limitation #11) | Oppo CPH2737 (`OP5F02L1`) + same-DNG JVM harness | Full table and log line in *Warm Street device validation* below; captures `dev-warmstreet/natural.jpg`, `warmstreet.jpg`, panels `ab-indoor-crop.jpg`, `ab-outdoor-crop.jpg` |

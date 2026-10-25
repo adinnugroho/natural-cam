@@ -1895,15 +1895,28 @@ gallery update
 
 Do not block the main UI until JPEG encoding completes.
 
+When a temporary platform JPEG is available with a RAW capture, NATURAL may publish a
+downsampled preview while RAW development runs. It is an interim acknowledgement, not
+the final NATURAL image, and must be replaced or cleared when processing completes.
+
 ---
 
 # 73. Burst Behavior
 
-Burst capture is not an MVP requirement.
+Single-shot capture remains the MVP baseline. Phase 1 adds an optional same-exposure
+RAW MFNR path for NATURAL when RAW is available:
 
-The architecture should avoid decisions that make burst impossible later.
+1. request up to three RAW frames;
+2. fall back to one RAW frame if the burst cannot be completed;
+3. fuse compatible frames before the existing RAW pipeline;
+4. record the fallback honestly;
+5. never require the burst for PURE, SYSTEM, RAW_ONLY, or normal camera use.
 
-But no early optimization should compromise single-shot image quality or stability merely for hypothetical burst support.
+The current capture implementation uses sequential CameraX RAW captures. The phase2
+fusion implementation prefers GLES 3 for proxy generation, candidate scoring, and
+CFA accumulation, with the CPU reference path as the automatic fallback. It does
+not claim atomic Camera2 burst timing or per-frame gyro metadata. A later Camera2
+backend may replace the capture mechanism without changing the fusion boundary.
 
 ---
 
@@ -3277,25 +3290,35 @@ Any addition must remain consistent with the PRD.
 
 # 133. Multi-Frame Processing
 
-Multi-frame photography is not forbidden permanently.
+Multi-frame photography is allowed when it improves noise, real detail, or dynamic
+range without violating the natural-rendering philosophy.
 
-However it must not be introduced merely to increase:
+Phase 1 is limited to:
 
-```text
-HDR appearance
-brightness
-sharpness
-```
+* three same-exposure RAW frames for NATURAL;
+* bounded translation alignment on a reduced CFA-aware green proxy;
+* exposure-product normalization;
+* compatible-frame rejection;
+* CFA-domain averaging;
+* the existing RAW development pipeline afterward.
 
-A future multi-frame implementation would need to demonstrate that it improves:
+Phase 2 prefers a GLES 3 backend for proxy generation, candidate translation
+scoring, and CFA accumulation. If EGL, shader compilation, framebuffer allocation,
+or GPU memory fails, the CPU reference implementation is used automatically.
 
-```text
-noise
-detail
-dynamic range
-```
+Phase 3 adds an optional HDR bracket setting for NATURAL RAW:
 
-without violating the natural-rendering philosophy.
+* three sequential frames at approximately -2 EV, 0 EV, and +2 EV;
+* the middle exposure is the geometric reference;
+* exposure-product normalization and the existing bounded alignment are reused;
+* global NATURAL tone rendering remains unchanged; no local HDR halos or forced HDR display;
+* if exposure compensation is unavailable, the plan falls back to MFNR and records the limitation.
+
+Bracket capture uses sequential CameraX capture first so the preview surface stays live and does
+not disappear during the burst. Direct Camera2 RAW+JPEG capture is the compatibility fallback
+when CameraX cannot complete the requested frame set. The saved RAW companion remains the
+reference frame and the final JPEG may be the bracket-fused result. Any capture, GPU, or fusion
+fallback is reported as a limitation.
 
 ---
 

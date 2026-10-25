@@ -10,8 +10,8 @@ import com.adin.naturalcam.domain.NoiseReductionMode
 import com.adin.naturalcam.domain.EdgeMode
 import com.adin.naturalcam.domain.PipelineType
 import com.adin.naturalcam.domain.ProcessingProfile
+import com.adin.naturalcam.domain.RawFrameStrategy
 import com.adin.naturalcam.domain.RawMode
-
 /**
  * Single place where capture-path decisions are made (AGENTS 33). Inputs:
  * real per-camera capabilities + requested profile/output (SPEC 20). Priority
@@ -25,6 +25,7 @@ object CapturePathResolver {
         profile: ProcessingProfile,
         rawMode: RawMode,
         zoomRatio: Float = 1f,
+        hdrBracketEnabled: Boolean = false,
     ): CapturePlan {
         val saveRaw = rawMode != RawMode.FINAL_ONLY
         // Below 1x the logical camera engages a *wider* physical camera. RAW is not exposed
@@ -45,13 +46,19 @@ object CapturePathResolver {
 
         val plan = when (profile) {
             ProcessingProfile.SYSTEM -> resolveSystem(raw, yuv, jpeg, saveRaw, isp)
-            ProcessingProfile.NATURAL -> resolveNatural(raw, yuv, jpeg, saveRaw, isp)
+            ProcessingProfile.NATURAL ->
+                resolveNatural(raw, yuv, jpeg, saveRaw, isp, capabilities, hdrBracketEnabled)
             ProcessingProfile.PURE -> resolvePure(raw, yuv, jpeg, saveRaw, isp)
         }
 
         // RAW-only mode must never synthesize a final image from an unwanted path.
         val resolved = when {
-            rawMode == RawMode.RAW_ONLY && plan.source == CaptureSource.RAW_SENSOR -> plan.copy(saveRaw = true)
+            rawMode == RawMode.RAW_ONLY && plan.source == CaptureSource.RAW_SENSOR ->
+                plan.copy(
+                    saveRaw = true,
+                    rawFrameCount = 1,
+                    rawFrameStrategy = RawFrameStrategy.SINGLE,
+                )
             // A framing wider than 1x cannot come from RAW even though this camera has it:
             // say so instead of delivering the narrower main-sensor frame unexplained.
             wideFraming && rawMode != RawMode.RAW_ONLY && capabilities.rawUsable ->
@@ -94,14 +101,31 @@ object CapturePathResolver {
         jpeg: Boolean,
         saveRaw: Boolean,
         isp: IspConfiguration,
+        capabilities: CameraCapabilities,
+        hdrBracketEnabled: Boolean,
     ): CapturePlan = when {
-        raw -> CapturePlan(
-            source = CaptureSource.RAW_SENSOR,
-            pipeline = PipelineType.RAW_NATURAL,
-            saveRaw = saveRaw,
-            ispConfiguration = isp,
-            limitations = ispLimitations(isp) + CaptureLimitation.PREVIEW_MAY_DIFFER,
-        )
+        raw -> {
+            val useHdrBracket = hdrBracketEnabled && capabilities.exposureCompensationUsable
+            CapturePlan(
+                source = CaptureSource.RAW_SENSOR,
+                pipeline = PipelineType.RAW_NATURAL,
+                saveRaw = saveRaw,
+                ispConfiguration = isp,
+                limitations = ispLimitations(isp) +
+                    CaptureLimitation.PREVIEW_MAY_DIFFER +
+                    if (hdrBracketEnabled && !useHdrBracket) {
+                        setOf(CaptureLimitation.HDR_BRACKET_FALLBACK)
+                    } else {
+                        emptySet()
+                    },
+                rawFrameCount = 3,
+                rawFrameStrategy = if (useHdrBracket) {
+                    RawFrameStrategy.HDR_BRACKET
+                } else {
+                    RawFrameStrategy.MFNR
+                },
+            )
+        }
         yuv -> CapturePlan(
             source = CaptureSource.YUV,
             pipeline = PipelineType.YUV_NATURAL,
