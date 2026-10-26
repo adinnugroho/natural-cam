@@ -22,6 +22,7 @@ import com.adin.naturalcam.domain.CameraCapabilities
 import com.adin.naturalcam.domain.CameraError
 import com.adin.naturalcam.domain.CameraId
 import com.adin.naturalcam.domain.CameraState
+import com.adin.naturalcam.domain.LensFacing
 import com.adin.naturalcam.domain.CaptureMetadata
 import com.adin.naturalcam.domain.CapturePlan
 import com.adin.naturalcam.domain.CaptureSource
@@ -93,6 +94,22 @@ class CameraXController(
     private val _state = MutableStateFlow<CameraState>(CameraState.Uninitialized)
     override val state: StateFlow<CameraState> = _state.asStateFlow()
 
+    /**
+     * Physical device rotation in 90° steps, from the accelerometer.
+     *
+     * The app is portrait-locked, so [previewView]'s display rotation is always 0 and
+     * says nothing about how the phone is held. Stills need the physical hold: without
+     * it a portrait capture is written in sensor orientation (landscape) and reads as
+     * rotated in every viewer.
+     */
+    private var deviceOrientationDegrees: Int? = null
+    private val orientationListener = object : android.view.OrientationEventListener(context) {
+        override fun onOrientationChanged(orientation: Int) {
+            if (orientation == ORIENTATION_UNKNOWN) return
+            deviceOrientationDegrees = ((orientation + 45) / 90 * 90) % 360
+        }
+    }
+
     // Published as immutable snapshots rebuilt by initialize(): the old getters copied
     // the whole map/list on every read, and DeviceInfoScreen reads them per recomposition.
     private var capabilitiesSnapshot: Map<CameraId, CameraCapabilities> = emptyMap()
@@ -111,6 +128,7 @@ class CameraXController(
     override suspend fun initialize(): List<LensOption> {
         val provider = awaitProvider()
         this.provider = provider
+        if (orientationListener.canDetectOrientation()) orientationListener.enable()
         val infos = provider.availableCameraInfos
         if (infos.isEmpty()) {
             _state.value = CameraState.Error(CameraError.CameraUnavailable("no cameras reported"))
@@ -287,6 +305,7 @@ class CameraXController(
      * (AGENTS 44): a buffered [ImageProxy] holds a HAL buffer open.
      */
     override suspend fun close() {
+        orientationListener.disable()
         provider?.unbindAll()
         provider = null
         preview = null
@@ -532,11 +551,11 @@ class CameraXController(
                 jpegSize = android.util.Size(jpegSize.width, jpegSize.height),
                 exposureCompensationEv = baseExposureEv,
                 bracketOffsetsEv = offsets,
-                rotation = currentRotationDegrees(),
+                rotation = captureRotationDegrees(),
             )
             return CapturedFrames(
                 captureId = request.captureId,
-                metadata = baselineMetadata(request, currentRotationDegrees()),
+                metadata = baselineMetadata(request, captureRotationDegrees()),
                 rawDngFiles = result.dngFiles,
                 yuv = null,
                 jpegBytes = null,
@@ -558,7 +577,7 @@ class CameraXController(
     ): CapturedFrames {
         val dngFiles = mutableListOf<File>()
         val wantsJpeg = wantsHalJpeg(request)
-        val rotation = currentRotationDegrees()
+        val rotation = captureRotationDegrees()
         val baseExposureEv = requestedExposureEv +
             if (request.profile == ProcessingProfile.NATURAL) NATURAL_CAPTURE_BIAS_EV else 0f
         val jpegFrameIndex = if (strategy == RawFrameStrategy.HDR_BRACKET && frameCount > 1) 1 else 0
@@ -650,7 +669,7 @@ class CameraXController(
     private suspend fun captureJpeg(request: PhotoCaptureRequest, plan: CapturePlan): CapturedFrames {
         val stream = ByteArrayOutputStream()
         val options = ImageCapture.OutputFileOptions.Builder(stream).build()
-        val rotation = currentRotationDegrees()
+        val rotation = captureRotationDegrees()
         val capture = imageCapture
             ?: throw CameraException(CameraError.CameraUnavailable("capture use case missing"))
         Log.d(TAG, "capture ${request.captureId.value} jpeg takePicture fmt=$captureFormat")
@@ -701,10 +720,10 @@ class CameraXController(
         // not the still the user asked for.
         analysisChannel.tryReceive().getOrNull()?.close()
         val proxy = analysisChannel.receive()
-        // CameraX's own display relationship for this frame; currentRotationDegrees() reports the
-        // display rotation only, which is 0 when the phone is held upright, so it left YUV stills
-        // in sensor orientation (sideways).
-        val rotation = proxy.imageInfo.rotationDegrees
+        // Same correction the RAW/JPEG stills use: CameraX's own ImageInfo.rotationDegrees is
+        // derived from the *display* target rotation, which the portrait lock pins at 0, so it
+        // ignores how the phone is actually held.
+        val rotation = captureRotationDegrees()
         try {
             val yuv = proxy.toYuvImage()
             return CapturedFrames(
@@ -744,6 +763,23 @@ class CameraXController(
             android.view.Surface.ROTATION_270 -> 270
             else -> 0
         }
+    }
+
+    /**
+     * Clockwise rotation that makes a captured frame upright for the current hold.
+     *
+     * Same rule the Camera2 sample uses for JPEG orientation: the sensor is mounted at
+     * [CameraCapabilities.sensorOrientation] (90° on the rear camera here), and a phone
+     * held upright needs exactly that much correction. Front cameras mirror the device
+     * term. Falls back to the display rotation only when no sensor is known, and to it
+     * when the accelerometer has not reported yet.
+     */
+    private fun captureRotationDegrees(): Int {
+        val capabilities = selected?.let { capabilitiesSnapshot[it] }
+        val sensor = capabilities?.sensorOrientation ?: return currentRotationDegrees()
+        val device = deviceOrientationDegrees ?: return sensor % 360
+        val signed = if (capabilities.lensFacing == LensFacing.FRONT) -device else device
+        return ((sensor + signed) % 360 + 360) % 360
     }
 
     private suspend fun awaitProvider(): ProcessCameraProvider =

@@ -339,8 +339,12 @@ class CaptureCoordinator(
 
         // RAW carries the authoritative capture metadata (AGENTS 52).
         val rawMeta = rawImage.metadata
+        timings?.fact("orientationDegrees", rawMeta.orientationDegrees.toString())
+        // The file name comes from metadata.timestampMs, so the delivered EXIF/MediaStore
+        // date must use that same clock. Taking rawMeta.timestampMs (frame arrival) made
+        // the JPEG several seconds older than its own name, and galleries that sort by
+        // EXIF/date_taken filed the newest shot behind the previous one.
         val fullMetadata = metadata.copy(
-            timestampMs = rawMeta.timestampMs,
             orientationDegrees = rawMeta.orientationDegrees,
             iso = rawMeta.isoSpeed,
             exposureTimeNs = rawMeta.exposureTimeNs,
