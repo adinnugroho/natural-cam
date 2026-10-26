@@ -271,7 +271,11 @@ internal class Camera2RawBurstCapture(
             colorMatrix2 = transform(characteristics.get(CameraCharacteristics.SENSOR_COLOR_TRANSFORM2)),
             forwardMatrix1 = transform(characteristics.get(CameraCharacteristics.SENSOR_FORWARD_MATRIX1)),
             forwardMatrix2 = transform(characteristics.get(CameraCharacteristics.SENSOR_FORWARD_MATRIX2)),
-            asShotNeutral = null,
+            // Same WB DngCreator writes into the DNG's AsShotNeutral tag. Without it the
+            // in-memory path skips metadata WB and grey-world alone leaves warm casts.
+            asShotNeutral = result.get(CaptureResult.COLOR_CORRECTION_GAINS)?.let { gains ->
+                floatArrayOf(1f / gains.red, 1f / gains.getComponent(1), 1f / gains.blue)
+            },
             isoSpeed = result.get(CaptureResult.SENSOR_SENSITIVITY),
             exposureTimeNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME),
             aperture = result.get(CaptureResult.LENS_APERTURE),
