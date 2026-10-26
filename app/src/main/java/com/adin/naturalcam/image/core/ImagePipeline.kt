@@ -23,12 +23,14 @@ import com.adin.naturalcam.image.processing.WhiteBalanceStage
 import com.adin.naturalcam.image.raw.ColorMatrixFactory
 import com.adin.naturalcam.image.raw.Demosaicer
 import com.adin.naturalcam.image.raw.LensShadingCorrector
-import com.adin.naturalcam.image.raw.GlesRawPurePipeline
+import com.adin.naturalcam.image.raw.GpuRawPipeline
+import com.adin.naturalcam.image.raw.GpuPipelineConfig
 import com.adin.naturalcam.image.raw.RawNormalizer
 import com.adin.naturalcam.image.style.StyleEngine
 import com.adin.naturalcam.image.style.FastJpegStyleProcessor
 import com.adin.naturalcam.image.yuv.YuvToRgbConverter
 import java.util.Locale
+import kotlin.math.pow
 
 /**
  * Processing boundary (SPEC 50). Profiles are product intent; this pipeline is
@@ -111,22 +113,44 @@ class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
             (config.profile == ProcessingProfile.PURE || config.profile == ProcessingProfile.NATURAL) &&
             BuildConfig.EXPERIMENTAL_GPU_PIPELINE
         ) {
-            val gpu = timings.measureStage("gpuPipeline") {
-                GlesRawPurePipeline.tryRender(raw, config)
+            val meta = raw.metadata
+            val neutral = meta.asShotNeutral
+            val gains = neutral?.let { RgbGains.fromAsShotNeutral(it) }
+            val matrix = runCatching { ColorMatrixFactory.cameraToWorkingRgbMatrix(meta) }.getOrNull()
+            if (gains != null && matrix != null && config.style == com.adin.naturalcam.domain.StyleState()) {
+                val gpuConfig = GpuPipelineConfig(
+                    natural = config.profile == ProcessingProfile.NATURAL,
+                    wbGains = gains,
+                    colorMatrix = matrix,
+                    warmth = if (config.profile == ProcessingProfile.NATURAL) naturalWarmth(config.tone) else 0f,
+                    exposureGain = if (config.profile == ProcessingProfile.NATURAL) 2f.pow(config.tone.exposureStops) else 1f,
+                    midtoneGamma = if (config.profile == ProcessingProfile.NATURAL) config.tone.midtoneGamma else 1f,
+                    contrast = if (config.profile == ProcessingProfile.NATURAL) config.tone.contrast else 0f,
+                    highlightRollOffStart = if (config.profile == ProcessingProfile.NATURAL) config.tone.highlightRollOffStart else 1f,
+                    highlightCompression = if (config.profile == ProcessingProfile.NATURAL) config.tone.highlightCompression else 0f,
+                    chromaStrength = if (config.profile == ProcessingProfile.NATURAL) config.chromaSmoothStrength else 0f,
+                    lumaStrength = if (config.profile == ProcessingProfile.NATURAL) config.lumaSmoothStrength else 0f,
+                    sharpenAmount = if (config.profile == ProcessingProfile.NATURAL) config.sharpenAmount else 0f,
+                )
+                val gpu = timings.measureStage("gpuPipeline") {
+                    GpuRawPipeline.tryRender(raw, gpuConfig)
+                }
+                if (gpu != null) {
+                    timings?.fact("gpuPipelineBackend", "gpu-native-${config.profile.name.lowercase()}")
+                    val rotated = timings.measureStage("rotate") {
+                        ImageRotation.rotate(gpu.argb, gpu.width, gpu.height, raw.metadata.orientationDegrees)
+                    }
+                    val cropped = timings.measureStage("crop") {
+                        AspectCropper.crop(rotated.argb, rotated.width, rotated.height, config.outputAspect)
+                    }
+                    return timings.measureStage("encode") {
+                        encoder.encode(cropped.argb, cropped.width, cropped.height, config.jpegQuality)
+                    }
+                }
+                timings?.fact("gpuPipelineBackend", "cpu-reference")
+            } else {
+                timings?.fact("gpuPipelineBackend", "cpu-style-fallback")
             }
-            if (gpu != null) {
-                timings?.fact("gpuPipelineBackend", "gles3-${config.profile.name.lowercase()}")
-                val rotated = timings.measureStage("rotate") {
-                    ImageRotation.rotate(gpu.argb, gpu.width, gpu.height, raw.metadata.orientationDegrees)
-                }
-                val cropped = timings.measureStage("crop") {
-                    AspectCropper.crop(rotated.argb, rotated.width, rotated.height, config.outputAspect)
-                }
-                return timings.measureStage("encode") {
-                    encoder.encode(cropped.argb, cropped.width, cropped.height, config.jpegQuality)
-                }
-            }
-            timings?.fact("gpuPipelineBackend", "cpu-reference")
         }
         var bayer: BayerImage? = null
         timings.measureStage("normalize") { bayer = RawNormalizer.normalize(raw) }
