@@ -29,10 +29,10 @@ import kotlin.math.sqrt
 internal object GlesRawBurstFusion {
     private const val TAG = "GlesRawBurstFusion"
     private const val PROXY_STEP = 4
-    private const val MAX_SHIFT_CELLS = 2
-    private const val CANDIDATE_COUNT = 25
+    private const val MAX_SHIFT_CELLS = 3
+    private const val CANDIDATE_COUNT = 49
     private const val MAX_EXPOSURE_SCALE = 4.0f
-    private const val MAX_ALIGNMENT_RMSE = 0.08f
+    private const val MAX_ALIGNMENT_RMSE = 0.05f
     private data class SessionKey(
         val width: Int,
         val height: Int,
@@ -351,10 +351,10 @@ internal object GlesRawBurstFusion {
             var bestError = Float.POSITIVE_INFINITY
             for (index in 0 until CANDIDATE_COUNT) {
                 val error = values.get(index)
-                val dx = index % 5 - MAX_SHIFT_CELLS
-                val dy = index / 5 - MAX_SHIFT_CELLS
-                val bestDx = bestIndex % 5 - MAX_SHIFT_CELLS
-                val bestDy = bestIndex / 5 - MAX_SHIFT_CELLS
+                val dx = index % 7 - MAX_SHIFT_CELLS
+                val dy = index / 7 - MAX_SHIFT_CELLS
+                val bestDx = bestIndex % 7 - MAX_SHIFT_CELLS
+                val bestDy = bestIndex / 7 - MAX_SHIFT_CELLS
                 if (
                     error < bestError - 1e-6f ||
                     (abs(error - bestError) <= 1e-6f &&
@@ -365,8 +365,8 @@ internal object GlesRawBurstFusion {
                 }
             }
             return Alignment(
-                dx = bestIndex % 5 - MAX_SHIFT_CELLS,
-                dy = bestIndex / 5 - MAX_SHIFT_CELLS,
+                dx = bestIndex % 7 - MAX_SHIFT_CELLS,
+                dy = bestIndex / 7 - MAX_SHIFT_CELLS,
                 rmse = sqrt(max(bestError, 0f)),
             )
         }
@@ -580,8 +580,8 @@ internal object GlesRawBurstFusion {
 
         void main() {
             int candidate = int(gl_FragCoord.x);
-            int dx = candidate - (candidate / 5) * 5 - 2;
-            int dy = candidate / 5 - 2;
+            int dx = candidate - (candidate / 7) * 7 - 3;
+            int dy = candidate / 7 - 3;
             int firstX = max(0, -dx);
             int lastX = min(uProxySize.x, uProxySize.x - dx);
             int firstY = max(0, -dy);

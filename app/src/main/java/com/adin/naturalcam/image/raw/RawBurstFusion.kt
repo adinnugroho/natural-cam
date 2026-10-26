@@ -16,9 +16,9 @@ import kotlin.math.sqrt
  */
 object RawBurstFusion {
     private const val PROXY_STEP = 4
-    private const val MAX_SHIFT_CELLS = 2
+    private const val MAX_SHIFT_CELLS = 3
     private const val PROXY_SAMPLE_STEP = 2
-    private const val MAX_ALIGNMENT_RMSE = 0.08f
+    private const val MAX_ALIGNMENT_RMSE = 0.05f
     private const val MAX_EXPOSURE_SCALE = 4.0f
 
     data class Result(
