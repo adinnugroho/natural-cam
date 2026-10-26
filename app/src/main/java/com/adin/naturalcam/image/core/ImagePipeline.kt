@@ -117,26 +117,48 @@ class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
             val neutral = meta.asShotNeutral
             val gains = neutral?.let { RgbGains.fromAsShotNeutral(it) }
             val matrix = runCatching { ColorMatrixFactory.cameraToWorkingRgbMatrix(meta) }.getOrNull()
-            if (gains != null && matrix != null && config.style == com.adin.naturalcam.domain.StyleState()) {
+            if (gains != null && matrix != null) {
+                val natural = config.profile == ProcessingProfile.NATURAL
+                val style = if (natural) StyleEngine.resolve(config.style) else null
                 val gpuConfig = GpuPipelineConfig(
-                    natural = config.profile == ProcessingProfile.NATURAL,
+                    natural = natural,
                     wbGains = gains,
                     colorMatrix = matrix,
-                    warmth = if (config.profile == ProcessingProfile.NATURAL) naturalWarmth(config.tone) else 0f,
-                    exposureGain = if (config.profile == ProcessingProfile.NATURAL) 2f.pow(config.tone.exposureStops) else 1f,
-                    midtoneGamma = if (config.profile == ProcessingProfile.NATURAL) config.tone.midtoneGamma else 1f,
-                    contrast = if (config.profile == ProcessingProfile.NATURAL) config.tone.contrast else 0f,
-                    highlightRollOffStart = if (config.profile == ProcessingProfile.NATURAL) config.tone.highlightRollOffStart else 1f,
-                    highlightCompression = if (config.profile == ProcessingProfile.NATURAL) config.tone.highlightCompression else 0f,
-                    chromaStrength = if (config.profile == ProcessingProfile.NATURAL) config.chromaSmoothStrength else 0f,
-                    lumaStrength = if (config.profile == ProcessingProfile.NATURAL) config.lumaSmoothStrength else 0f,
-                    sharpenAmount = if (config.profile == ProcessingProfile.NATURAL) config.sharpenAmount else 0f,
+                    warmth = if (natural) naturalWarmth(config.tone) else 0f,
+                    exposureGain = if (natural) 2f.pow(config.tone.exposureStops) else 1f,
+                    midtoneGamma = if (natural) config.tone.midtoneGamma else 1f,
+                    contrast = if (natural) config.tone.contrast else 0f,
+                    highlightRollOffStart = if (natural) config.tone.highlightRollOffStart else 1f,
+                    highlightCompression = if (natural) config.tone.highlightCompression else 0f,
+                    chromaStrength = if (natural) config.chromaSmoothStrength else 0f,
+                    lumaStrength = if (natural) config.lumaSmoothStrength else 0f,
+                    sharpenAmount = if (natural) config.sharpenAmount else 0f,
+                    styleStrength = if (natural) config.style.strength.coerceIn(0f, 1f) else 0f,
+                    saturation = if (natural) config.style.saturation.coerceIn(-1f, 1f) else 0f,
+                    bloom = if (natural) config.style.bloom.coerceIn(0f, 1f) else 0f,
+                    toneContrast = style?.toneContrast ?: 0f,
+                    midtoneLift = style?.midtoneLift ?: 0f,
+                    shoulderStrength = style?.shoulderStrength ?: 0f,
+                    temperature = style?.temperature ?: 0f,
+                    chromaScale = style?.chromaScale ?: 1f,
+                    chromaCompression = style?.chromaCompression ?: 0f,
+                    paletteHueShift = style?.paletteHueShift ?: 0f,
+                    paletteChromaBoost = style?.paletteChromaBoost ?: 0f,
+                    shadowHueTint = style?.shadowHueTint ?: 0f,
                 )
                 val gpu = timings.measureStage("gpuPipeline") {
                     GpuRawPipeline.tryRender(raw, gpuConfig)
                 }
                 if (gpu != null) {
                     timings?.fact("gpuPipelineBackend", "gpu-native-${config.profile.name.lowercase()}")
+                    timings?.fact("style", StyleEngine.describe(config.style))
+                    // Grain belongs to the delivered pixels: an equal whole-level shift on
+                    // all three channels is exactly colour-free (same as the CPU path).
+                    if (natural) {
+                        timings.measureStage("grain") {
+                            GrainStage.apply(gpu.argb, gpu.width, gpu.height, config.style.grain)
+                        }
+                    }
                     val rotated = timings.measureStage("rotate") {
                         ImageRotation.rotate(gpu.argb, gpu.width, gpu.height, raw.metadata.orientationDegrees)
                     }
@@ -149,7 +171,7 @@ class DefaultImagePipeline(private val encoder: JpegEncoder) : ImagePipeline {
                 }
                 timings?.fact("gpuPipelineBackend", "cpu-reference")
             } else {
-                timings?.fact("gpuPipelineBackend", "cpu-style-fallback")
+                timings?.fact("gpuPipelineBackend", "cpu-metadata-fallback")
             }
         }
         var bayer: BayerImage? = null

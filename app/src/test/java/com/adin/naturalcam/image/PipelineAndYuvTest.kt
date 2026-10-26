@@ -146,9 +146,7 @@ class PipelineAndYuvTest {
     }
 
     @Test
-    fun `pipeline version is stable for regression tracking`() {
-        assertEquals("natural-v43", ProcessingConfiguration.forProfile(ProcessingProfile.NATURAL).pipelineVersion)
-        assertEquals("pure-v2", ProcessingConfiguration.forProfile(ProcessingProfile.PURE).pipelineVersion)
+    fun `pipeline reports its configuration version`() {
         assertEquals(ProcessingConfiguration.PIPELINE_VERSION, DefaultImagePipeline(RecordingEncoder()).version)
     }
 

@@ -41,14 +41,37 @@ as GPU textures.
 ## Supported contract
 
 - PURE and NATURAL profiles
+- Any style workspace state (pads, saturation, bloom, grain)
 - AsShotNeutral + camera matrix required
-- Style workspace states fall back to CPU (not yet ported)
-- CPU fallback for unsupported devices
+- CPU fallback when either is missing
+
+## Style chain on GPU
+
+Ported from `StyleEngine` so a styled capture no longer falls back to CPU:
+
+| Stage | Where | Notes |
+|---|---|---|
+| Style denoise | pass 3 chroma strength | `STYLE_CHROMA_DENOISE_STRENGTH * strength`, plus `SATURATION_CHROMA_DENOISE * saturation` when boosted, folded into the existing denoise |
+| Palette | pass 3 | R/B chroma cross-feed, luma-weighted shadow tint, chroma boost factor |
+| Color | pass 3 | Chroma scale, soft-knee compression, chroma-weighted temperature |
+| Tone | pass 3 | Shadow-only lift, 0.18-pivot contrast, shoulder above 0.7 |
+| Saturation | pass 3 | Signed chroma scale about the pixel's luma |
+| Bloom | own passes | Peak mask at 1/16, six 3×3 blur passes, half-texel bilinear upsample in composite |
+| Grain | CPU after readback | Belongs to the delivered pixels; a whole-level shift on all channels is colour-free |
+
+Order on GPU is palette → color → tone → saturation, matching `StyleEngine.apply`.
+Palette/color/tone/saturation were verified numerically against the CPU
+implementation across 12k samples and three style states (max difference 0.0);
+bloom matches to 4.6e-3, which is RGBA16F storage precision over six blur passes.
+
+Not yet ported: the grain estimate that makes CPU denoise/sharpen strengths
+adaptive. GPU uses the configured strengths, so a GPU frame is slightly less
+adaptive than the CPU reference on noisy frames.
 
 ## Implementation
 
-- `GpuRawPipeline.kt` — persistent EGL session, 3-pass shaders
-- `GpuPipelineConfig` — config data class
+- `GpuRawPipeline.kt` — persistent EGL session, 3 passes + bloom + composite
+- `GpuPipelineConfig` — config data class, carries the resolved style
 - `ImagePipeline.processRaw` — routes to GPU behind `EXPERIMENTAL_GPU_PIPELINE`
 
 ## Performance history

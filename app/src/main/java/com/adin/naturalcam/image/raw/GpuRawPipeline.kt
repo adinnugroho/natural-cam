@@ -11,6 +11,8 @@ import android.util.Log
 import com.adin.naturalcam.image.core.CfaLayout
 import com.adin.naturalcam.image.core.RawImage
 import com.adin.naturalcam.image.core.RgbGains
+import com.adin.naturalcam.image.core.SATURATION_CHROMA_DENOISE
+import com.adin.naturalcam.image.core.STYLE_CHROMA_DENOISE_STRENGTH
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.Executors
@@ -19,24 +21,27 @@ import java.util.concurrent.Executors
  * GPU-native RAW pipeline using multi-pass rendering.
  *
  * Pass 1: normalize + demosaic + WB + color matrix → RGBA16F (expensive, runs once)
- * Pass 2: NATURAL tone + highlight roll-off + clipped-neutralize → RGBA16F (cheap, per-pixel)
- * Pass 3: denoise + sharpen + sRGB encode → RGBA8 (cheap, small neighborhood)
+ * Pass 2: residual WB + NATURAL tone + highlight roll-off + clipped-neutralize → RGBA16F
+ * Pass 3: denoise + sharpen + style pads/saturation → RGBA16F (linear)
+ * Bloom:  peak mask at 1/16 + six 3x3 blur passes → RGBA16F (skipped at bloom 0)
+ * Composite: glow + sRGB encode → RGBA8
  *
- * Only the final 8-bit frame crosses the GPU/CPU boundary.
- * The key optimization over the single-pass shader: denoise/sharpen sample
- * the already-demosaiced RGBA16F result instead of re-running demosaic
- * for every neighbor pixel.
+ * Only the final 8-bit frame crosses the GPU/CPU boundary. Grain stays on the CPU
+ * because it belongs to the delivered pixels, and it is colour-free there.
  *
  * Supported contract:
  * - RAW sensor input (16-bit CFA mosaic)
- * - NATURAL and PURE profiles
+ * - NATURAL and PURE profiles, any style state
  * - AsShotNeutral + camera matrix required
- * - Style workspace falls back to CPU
  */
 internal object GpuRawPipeline {
     private const val TAG = "GpuRawPipeline"
     private const val READBACK_ROWS = 64
     private const val REDUCTION_SIZE = 32
+
+    /** Must match BloomStage: mask cell = 16 full-res px, six 3x3 blur passes. */
+    private const val BLOOM_DOWNSAMPLE = 16
+    private const val BLOOM_BLUR_PASSES = 6
 
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "gpu-raw-pipeline")
@@ -108,15 +113,26 @@ internal object GpuRawPipeline {
         private var framebuffer = 0
 
         private var rawTexture = 0
-        private var textureA = 0   // Pass 1 output: linear RGB after demosaic+WB+matrix
+        private var textureA = 0   // Pass 1 output; pass 3 writes the styled linear result here
         private var textureB = 0   // Pass 2 output: tone-mapped
-        private var outputTexture = 0  // Pass 3 output: sRGB RGBA8
-        private var reductionTexture = 0  // 32x32 residual WB reduction
+        private var outputTexture = 0  // Composite output: sRGB RGBA8
+        private var reductionTexture = 0  // 32x32 residual WB cell sums (RGBA16F)
+        private var gainsTexture = 0      // 1x1 residual WB gains
+        private var maskTextureA = 0   // Bloom mask, 1/BLOOM_DOWNSAMPLE resolution
+        private var maskTextureB = 0
+        private var bloomMaskTexture = 0  // whichever mask holds the final blurred glow
+
+        private val maskWidth = maxOf(1, width / BLOOM_DOWNSAMPLE)
+        private val maskHeight = maxOf(1, height / BLOOM_DOWNSAMPLE)
 
         private var pass1Program = 0
         private var pass2Program = 0
         private var pass3Program = 0
         private var reductionProgram = 0
+        private var gainsProgram = 0
+        private var maskProgram = 0
+        private var blurProgram = 0
+        private var compositeProgram = 0
 
         init {
             initializeEgl()
@@ -127,14 +143,22 @@ internal object GpuRawPipeline {
             uploadRaw(raw)
             runPass1(raw, config)
             // Residual auto-WB: gray-world correction on Pass 1 output, same as CPU pipeline.
-            val residualGains = computeResidualWb()
+            runResidualWb()
             if (config.natural) {
-                runPass2(config, residualGains)
+                runPass2(config)
                 runPass3(config, textureB)
             } else {
-                runPass2Pure(residualGains)
+                runPass2Pure()
                 runPass3Pure(textureB)
             }
+            // Style bloom is spatial and needs the styled linear frame, so it runs after
+            // pass 3 and before the sRGB encode.
+            var bloomAmount = 0f
+            if (config.natural && config.bloom > 0f) {
+                runBloom()
+                bloomAmount = config.bloom.coerceIn(0f, 1f)
+            }
+            runComposite(bloomAmount)
             return readOutput()
         }
 
@@ -145,8 +169,19 @@ internal object GpuRawPipeline {
                 GLES30.glDeleteProgram(pass2Program)
                 GLES30.glDeleteProgram(pass3Program)
                 GLES30.glDeleteProgram(reductionProgram)
+                GLES30.glDeleteProgram(gainsProgram)
+                GLES30.glDeleteProgram(maskProgram)
+                GLES30.glDeleteProgram(blurProgram)
+                GLES30.glDeleteProgram(compositeProgram)
                 GLES30.glDeleteFramebuffers(1, intArrayOf(framebuffer), 0)
-                GLES30.glDeleteTextures(5, intArrayOf(rawTexture, textureA, textureB, outputTexture, reductionTexture), 0)
+                GLES30.glDeleteTextures(
+                    8,
+                    intArrayOf(
+                        rawTexture, textureA, textureB, outputTexture, reductionTexture,
+                        gainsTexture, maskTextureA, maskTextureB,
+                    ),
+                    0,
+                )
             }
             EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
             if (surface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, surface)
@@ -199,17 +234,20 @@ internal object GpuRawPipeline {
             textureA = createTexture(GLES30.GL_RGBA16F, width, height)
             textureB = createTexture(GLES30.GL_RGBA16F, width, height)
             outputTexture = createTexture(GLES30.GL_RGBA8, width, height)
-            reductionTexture = createTexture(GLES30.GL_RGBA32F, REDUCTION_SIZE, REDUCTION_SIZE)
+            reductionTexture = createTexture(GLES30.GL_RGBA16F, REDUCTION_SIZE, REDUCTION_SIZE)
+            gainsTexture = createTexture(GLES30.GL_RGBA16F, 1, 1)
+            maskTextureA = createTexture(GLES30.GL_RGBA16F, maskWidth, maskHeight)
+            maskTextureB = createTexture(GLES30.GL_RGBA16F, maskWidth, maskHeight)
+            bloomMaskTexture = maskTextureA
 
             pass1Program = link(PASS1_SHADER)
             pass2Program = link(PASS2_SHADER)
             pass3Program = link(PASS3_SHADER)
             reductionProgram = link(REDUCTION_SHADER)
-        }
-
-        private fun checkGl(stage: String) {
-            val err = GLES30.glGetError()
-            if (err != GLES30.GL_NO_ERROR) throw RuntimeException("$stage GL error 0x${Integer.toHexString(err)}")
+            gainsProgram = link(GAINS_SHADER)
+            maskProgram = link(BLOOM_MASK_SHADER)
+            blurProgram = link(BLOOM_BLUR_SHADER)
+            compositeProgram = link(COMPOSITE_SHADER)
         }
 
         private fun createTexture(internalFormat: Int, w: Int, h: Int): Int {
@@ -252,9 +290,8 @@ internal object GpuRawPipeline {
             drawFullscreen()
         }
 
-        // ---- Residual auto-WB: reduce textureA to small grid, read back, compute gains ----
-        private fun computeResidualWb(): FloatArray {
-            // Reduction grid: 32x32 cells, each covering ~width/32 × height/32 pixels
+        // ---- Residual auto-WB: reduce to per-cell sums, then to one gains texel ----
+        private fun runResidualWb() {
             attach(reductionTexture, REDUCTION_SIZE, REDUCTION_SIZE)
             GLES30.glUseProgram(reductionProgram)
             bindTexture(reductionProgram, "uInput", 0, textureA)
@@ -262,33 +299,13 @@ internal object GpuRawPipeline {
             uniform2i(reductionProgram, "uReductionSize", REDUCTION_SIZE, REDUCTION_SIZE)
             drawFullscreen()
 
-            val bytes = ByteBuffer
-                .allocateDirect(REDUCTION_SIZE * REDUCTION_SIZE * 4 * 4)
-                .order(ByteOrder.nativeOrder())
-            GLES30.glReadPixels(0, 0, REDUCTION_SIZE, REDUCTION_SIZE, GLES30.GL_RGBA, GLES30.GL_FLOAT, bytes)
-            checkGl("reduction readback")
-            val values = bytes.asFloatBuffer()
-
-            // Compute auto-WB gains from reduction sums (same logic as WhiteBalanceStage.auto)
-            var sumR = 0f; var sumG = 0f; var sumB = 0f; var count = 0f
-            for (i in 0 until REDUCTION_SIZE * REDUCTION_SIZE) {
-                val offset = i * 4
-                val r = values.get(offset)
-                val g = values.get(offset + 1)
-                val b = values.get(offset + 2)
-                val n = values.get(offset + 3)
-                if (n <= 0f) continue
-                sumR += r; sumG += g; sumB += b; count += n
-            }
-            if (count < 32f) return floatArrayOf(1f, 1f, 1f)
-            val meanR = sumR / count
-            val meanG = sumG / count
-            val meanB = sumB / count
-            return floatArrayOf(
-                (meanG / meanR).coerceIn(0.5f, 2f),
-                1f,
-                (meanG / meanB).coerceIn(0.5f, 2f),
-            )
+            // Collapsing on the GPU avoids a readback stall and any dependency on
+            // float render targets: pass 2 samples the single texel directly.
+            attach(gainsTexture, 1, 1)
+            GLES30.glUseProgram(gainsProgram)
+            bindTexture(gainsProgram, "uReduction", 0, reductionTexture)
+            uniform2i(gainsProgram, "uReductionSize", REDUCTION_SIZE, REDUCTION_SIZE)
+            drawFullscreen()
         }
 
         private fun transposeMatrix3(m: FloatArray): FloatArray = floatArrayOf(
@@ -298,11 +315,11 @@ internal object GpuRawPipeline {
         )
 
         // ---- Pass 2: residual WB + NATURAL tone + highlight roll-off + clipped-neutralize ----
-        private fun runPass2(config: GpuPipelineConfig, residualGains: FloatArray) {
+        private fun runPass2(config: GpuPipelineConfig) {
             attach(textureB)
             GLES30.glUseProgram(pass2Program)
             bindTexture(pass2Program, "uInput", 0, textureA)
-            uniform3f(pass2Program, "uResidualGains", residualGains)
+            bindTexture(pass2Program, "uGains", 1, gainsTexture)
             uniform1f(pass2Program, "uWarmth", config.warmth)
             uniform1f(pass2Program, "uExposureGain", config.exposureGain)
             uniform1f(pass2Program, "uToneGamma", config.midtoneGamma)
@@ -313,11 +330,11 @@ internal object GpuRawPipeline {
         }
 
         // ---- Pass 2 PURE: residual WB + clipped-neutralize ----
-        private fun runPass2Pure(residualGains: FloatArray) {
+        private fun runPass2Pure() {
             attach(textureB)
             GLES30.glUseProgram(pass2Program)
             bindTexture(pass2Program, "uInput", 0, textureA)
-            uniform3f(pass2Program, "uResidualGains", residualGains)
+            bindTexture(pass2Program, "uGains", 1, gainsTexture)
             uniform1f(pass2Program, "uWarmth", 0f)
             uniform1f(pass2Program, "uExposureGain", 1f)
             uniform1f(pass2Program, "uToneGamma", 1f)
@@ -327,22 +344,48 @@ internal object GpuRawPipeline {
             drawFullscreen()
         }
 
-        // ---- Pass 3: denoise + sharpen + sRGB encode (NATURAL) ----
+        // ---- Pass 3: denoise + sharpen + style, written linear for the composite ----
         private fun runPass3(config: GpuPipelineConfig, inputTexture: Int) {
-            attach(outputTexture)
+            attach(textureA)
             GLES30.glUseProgram(pass3Program)
             bindTexture(pass3Program, "uInput", 0, inputTexture)
             uniform2i(pass3Program, "uImageSize", width, height)
-            uniform1f(pass3Program, "uChromaStrength", config.chromaStrength)
+            // The style chain denoises once for its own strength and once more when the
+            // user boosts saturation; CPU runs them as separate smoothers, folding both
+            // into this pass's strength is the closest single-pass equivalent.
+            val styleChroma = STYLE_CHROMA_DENOISE_STRENGTH * config.styleStrength +
+                if (config.saturation > 0f) SATURATION_CHROMA_DENOISE * config.saturation else 0f
+            uniform1f(pass3Program, "uChromaStrength", config.chromaStrength + styleChroma)
             uniform1f(pass3Program, "uLumaStrength", config.lumaStrength)
             uniform1f(pass3Program, "uSharpenAmount", config.sharpenAmount)
             uniform1i(pass3Program, "uNatural", 1)
+            uniform4f(
+                pass3Program,
+                "uStyleA",
+                floatArrayOf(
+                    config.toneContrast, config.midtoneLift,
+                    config.shoulderStrength, config.temperature,
+                ),
+            )
+            uniform4f(
+                pass3Program,
+                "uStyleB",
+                floatArrayOf(
+                    config.chromaScale, config.chromaCompression,
+                    config.paletteHueShift, config.paletteChromaBoost,
+                ),
+            )
+            uniform4f(
+                pass3Program,
+                "uStyleC",
+                floatArrayOf(config.shadowHueTint, config.saturation, 0f, 0f),
+            )
             drawFullscreen()
         }
 
-        // ---- Pass 3 PURE: just sRGB encode ----
+        // ---- Pass 3 PURE: no denoise, sharpen or style; linear for the composite ----
         private fun runPass3Pure(inputTexture: Int) {
-            attach(outputTexture)
+            attach(textureA)
             GLES30.glUseProgram(pass3Program)
             bindTexture(pass3Program, "uInput", 0, inputTexture)
             uniform2i(pass3Program, "uImageSize", width, height)
@@ -350,6 +393,46 @@ internal object GpuRawPipeline {
             uniform1f(pass3Program, "uLumaStrength", 0f)
             uniform1f(pass3Program, "uSharpenAmount", 0f)
             uniform1i(pass3Program, "uNatural", 0)
+            uniform4f(pass3Program, "uStyleA", floatArrayOf(0f, 0f, 0f, 0f))
+            uniform4f(pass3Program, "uStyleB", floatArrayOf(1f, 0f, 0f, 0f))
+            uniform4f(pass3Program, "uStyleC", floatArrayOf(0f, 0f, 0f, 0f))
+            drawFullscreen()
+        }
+
+        // ---- Bloom: peak mask at 1/16, six 3x3 blur passes, then upsample in composite ----
+        private fun runBloom() {
+            attach(maskTextureA, maskWidth, maskHeight)
+            GLES30.glUseProgram(maskProgram)
+            bindTexture(maskProgram, "uInput", 0, textureA)
+            uniform2i(maskProgram, "uImageSize", width, height)
+            uniform2i(maskProgram, "uMaskSize", maskWidth, maskHeight)
+            drawFullscreen()
+
+            var source = maskTextureA
+            var target = maskTextureB
+            repeat(BLOOM_BLUR_PASSES) {
+                attach(target, maskWidth, maskHeight)
+                GLES30.glUseProgram(blurProgram)
+                bindTexture(blurProgram, "uInput", 0, source)
+                uniform2i(blurProgram, "uMaskSize", maskWidth, maskHeight)
+                drawFullscreen()
+                val previous = source
+                source = target
+                target = previous
+            }
+            // An even pass count lands back on maskTextureA; keep whichever one holds it.
+            bloomMaskTexture = source
+        }
+
+        // ---- Composite: add glow, encode sRGB, write the deliverable ----
+        private fun runComposite(bloomAmount: Float) {
+            attach(outputTexture)
+            GLES30.glUseProgram(compositeProgram)
+            bindTexture(compositeProgram, "uInput", 0, textureA)
+            bindTexture(compositeProgram, "uMask", 1, bloomMaskTexture)
+            uniform2i(compositeProgram, "uImageSize", width, height)
+            uniform2i(compositeProgram, "uMaskSize", maskWidth, maskHeight)
+            uniform1f(compositeProgram, "uBloomAmount", bloomAmount)
             drawFullscreen()
         }
 
@@ -619,12 +702,45 @@ internal object GpuRawPipeline {
         }
     """
 
-    // ---- Pass 2: NATURAL tone + highlight roll-off + clipped-neutralize ----
+    // ---- Residual auto-WB collapse: cell sums → one gains texel ----
+    private const val GAINS_SHADER = """
+        #version 300 es
+        precision highp float;
+        uniform sampler2D uReduction;
+        uniform ivec2 uReductionSize;
+        layout(location = 0) out vec4 outColor;
+
+        void main() {
+            vec3 sum = vec3(0.0);
+            float count = 0.0;
+            for (int y = 0; y < uReductionSize.y; y++) {
+                for (int x = 0; x < uReductionSize.x; x++) {
+                    vec4 cell = texelFetch(uReduction, ivec2(x, y), 0);
+                    sum += cell.rgb;
+                    count += cell.a;
+                }
+            }
+            if (count < 32.0) {
+                outColor = vec4(1.0, 1.0, 1.0, 1.0);
+                return;
+            }
+            vec3 mean = sum / count;
+            // gain = meanGreen / channel, clamped like WhiteBalanceStage.auto.
+            outColor = vec4(
+                clamp(mean.g / max(mean.r, 1e-6), 0.5, 2.0),
+                1.0,
+                clamp(mean.g / max(mean.b, 1e-6), 0.5, 2.0),
+                1.0
+            );
+        }
+    """
+
+    // ---- Pass 2: residual WB + NATURAL tone + highlight roll-off + clipped-neutralize ----
     private const val PASS2_SHADER = """
         #version 300 es
         precision highp float;
         uniform sampler2D uInput;
-        uniform vec3 uResidualGains;
+        uniform sampler2D uGains;
         uniform float uWarmth;
         uniform float uExposureGain;
         uniform float uToneGamma;
@@ -639,8 +755,9 @@ internal object GpuRawPipeline {
             ivec2 p = ivec2(gl_FragCoord.xy);
             vec3 value = texelFetch(uInput, p, 0).rgb;
 
-            // Residual gray-world WB (matches CPU WhiteBalanceStage.auto)
-            value *= uResidualGains;
+            // Residual gray-world WB (matches CPU WhiteBalanceStage.auto), collapsed to
+            // a single texel by the gains pass.
+            value *= texelFetch(uGains, ivec2(0), 0).rgb;
             // Warmth
             value *= vec3(1.0 + uWarmth, 1.0, 1.0 - uWarmth);
             // Exposure
@@ -678,7 +795,7 @@ internal object GpuRawPipeline {
         }
     """
 
-    // ---- Pass 3: denoise + sharpen + sRGB encode (RGBA8 output) ----
+    // ---- Pass 3: denoise + sharpen + style (linear RGBA16F output) ----
     private const val PASS3_SHADER = """
         #version 300 es
         precision highp float;
@@ -688,6 +805,9 @@ internal object GpuRawPipeline {
         uniform float uLumaStrength;
         uniform float uSharpenAmount;
         uniform int uNatural;
+        uniform vec4 uStyleA;   // toneContrast, midtoneLift, shoulderStrength, temperature
+        uniform vec4 uStyleB;   // chromaScale, chromaCompression, paletteHueShift, paletteChromaBoost
+        uniform vec4 uStyleC;   // shadowHueTint, saturation, unused, unused
         layout(location = 0) out vec4 outColor;
 
         float luma(vec3 c) { return c.r * 0.2126 + c.g * 0.7152 + c.b * 0.0722; }
@@ -697,9 +817,90 @@ internal object GpuRawPipeline {
             return texelFetch(uInput, clamped, 0).rgb;
         }
 
-        float encodeSrgb(float x) {
-            x = clamp(x, 0.0, 1.0);
-            return x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 0.4166666667) - 0.055;
+        // Mirrors StyleEngine.applyPalette: rose/green via chroma cross-feed (R/B only,
+        // green untouched), gold/blue via a luma-weighted shadow tint, then a chroma boost
+        // applied as a factor above 1.
+        vec3 applyPalette(vec3 c) {
+            float hue = uStyleB.z;
+            float boost = uStyleB.w;
+            float tint = uStyleC.x;
+            if (hue == 0.0 && boost == 0.0 && tint == 0.0) return c;
+            float l = luma(c);
+            float cr = c.r - l;
+            float cb = c.b - l;
+            float newR = c.r + hue * 0.20 * cb;
+            float newB = c.b - hue * 0.20 * cr;
+            float chromaWeight = clamp((cr * cr + cb * cb) / (cr * cr + cb * cb + 0.02), 0.0, 1.0);
+            float shadowWeight = exp(-l * 2.0) * 0.35 * chromaWeight;
+            newR += tint * shadowWeight;
+            newB -= tint * shadowWeight;
+            if (boost > 0.0) {
+                float factor = 1.0 + boost;
+                newR = l + (newR - l) * factor;
+                newB = l + (newB - l) * factor;
+            }
+            return vec3(max(newR, 0.0), c.g, max(newB, 0.0));
+        }
+
+        // Mirrors StyleEngine.applyColor: chroma scale with a soft knee, then a
+        // chroma-weighted warm/cool shift that leaves grey exactly neutral.
+        vec3 applyColor(vec3 c) {
+            float temperature = uStyleA.w;
+            float scale = uStyleB.x;
+            float compression = uStyleB.y;
+            if (temperature == 0.0 && scale == 1.0) return c;
+            float l = luma(c);
+            float cr = (c.r - l) * scale;
+            float cg = (c.g - l) * scale;
+            float cb = (c.b - l) * scale;
+            if (compression > 0.0) {
+                float mag = max(abs(cr), max(abs(cg), abs(cb)));
+                if (mag > 0.35) {
+                    float excess = (mag - 0.35) / 0.55;
+                    float damp = 1.0 - compression * excess / (1.0 + excess * 0.7);
+                    cr *= damp;
+                    cg *= damp;
+                    cb *= damp;
+                }
+            }
+            float chromaMag = cr * cr + cb * cb;
+            float chromaWeight = chromaMag / (chromaMag + 0.02);
+            float warmShift = temperature * chromaWeight;
+            return vec3(l + cr * (1.0 + warmShift), l + cg, l + cb * (1.0 - warmShift));
+        }
+
+        // Mirrors StyleEngine.applyTone, including the direction of each pad axis:
+        // +x firms contrast around the 0.18 pivot, +y lifts shadows only.
+        float toneChannel(float x, float contrastK) {
+            float lift = uStyleA.y;
+            float shoulder = uStyleA.z;
+            if (lift > 0.0 && x < 0.35) {
+                x *= 1.0 + lift * (1.0 - x / 0.35);
+            } else if (lift < 0.0 && x > 0.30) {
+                x += lift * (1.0 - (1.0 - x) / 0.70);
+            }
+            x = 0.18 + (x - 0.18) * contrastK;
+            if (shoulder > 0.0 && x > 0.7) x -= shoulder * (x - 0.7) * 0.2;
+            return max(x, 0.0);
+        }
+
+        vec3 applyTone(vec3 c) {
+            if (uStyleA.x == 0.0 && uStyleA.y == 0.0 && uStyleA.z == 0.0) return c;
+            float contrastK = 1.0 + uStyleA.x;
+            return vec3(
+                toneChannel(c.r, contrastK),
+                toneChannel(c.g, contrastK),
+                toneChannel(c.b, contrastK)
+            );
+        }
+
+        // Mirrors StyleEngine.applySaturation: signed chroma scale about the pixel's luma.
+        vec3 applySaturation(vec3 c) {
+            float signed = uStyleC.y;
+            if (signed == 0.0) return c;
+            float scale = 1.0 + 0.6 * signed;
+            float l = luma(c);
+            return max(vec3(l) + (c - l) * scale, 0.0);
         }
 
         void main() {
@@ -744,6 +945,108 @@ internal object GpuRawPipeline {
                 value = mix(value, vec3(neutral), amt);
             }
 
+            // Style pads and saturation. Bloom is a separate spatial pass on the
+            // linear result, grain is applied to the delivered pixels after readback.
+            value = applyPalette(value);
+            value = applyColor(value);
+            value = applyTone(value);
+            value = applySaturation(value);
+
+            outColor = vec4(value, 1.0);
+        }
+    """
+
+    // ---- Bloom mask: per-cell peak of the thresholded highlight, at 1/DOWNSAMPLE ----
+    private const val BLOOM_MASK_SHADER = """
+        #version 300 es
+        precision highp float;
+        uniform sampler2D uInput;
+        uniform ivec2 uImageSize;
+        uniform ivec2 uMaskSize;
+        layout(location = 0) out vec4 outColor;
+
+        const float THRESHOLD = 0.6;
+        const float KNEE = 0.4;
+
+        void main() {
+            ivec2 cell = ivec2(gl_FragCoord.xy);
+            ivec2 cellStart = cell * uImageSize / uMaskSize;
+            ivec2 cellEnd = (cell + 1) * uImageSize / uMaskSize;
+            vec3 peak = vec3(0.0);
+            for (int y = cellStart.y; y < max(cellEnd.y, cellStart.y + 1); y++) {
+                for (int x = cellStart.x; x < max(cellEnd.x, cellStart.x + 1); x++) {
+                    vec3 value = max(texelFetch(uInput, ivec2(x, y), 0).rgb, 0.0);
+                    vec3 knee = clamp((value - vec3(THRESHOLD)) / KNEE, 0.0, 1.0);
+                    peak = max(peak, value * knee);
+                }
+            }
+            outColor = vec4(peak, 1.0);
+        }
+    """
+
+    // ---- Bloom blur: one 3x3 binomial pass at mask resolution (CPU does six) ----
+    private const val BLOOM_BLUR_SHADER = """
+        #version 300 es
+        precision highp float;
+        uniform sampler2D uInput;
+        uniform ivec2 uMaskSize;
+        layout(location = 0) out vec4 outColor;
+
+        vec3 fetch(ivec2 p) {
+            return texelFetch(uInput, clamp(p, ivec2(0), uMaskSize - ivec2(1)), 0).rgb;
+        }
+
+        void main() {
+            ivec2 p = ivec2(gl_FragCoord.xy);
+            vec3 sum = vec3(0.0);
+            for (int y = -1; y <= 1; y++) {
+                for (int x = -1; x <= 1; x++) {
+                    float w = float((x == 0 ? 2 : 1) * (y == 0 ? 2 : 1));
+                    sum += fetch(p + ivec2(x, y)) * w;
+                }
+            }
+            outColor = vec4(sum / 16.0, 1.0);
+        }
+    """
+
+    // ---- Composite: add the upsampled glow, then encode to sRGB ----
+    private const val COMPOSITE_SHADER = """
+        #version 300 es
+        precision highp float;
+        uniform sampler2D uInput;
+        uniform sampler2D uMask;
+        uniform ivec2 uImageSize;
+        uniform ivec2 uMaskSize;
+        uniform float uBloomAmount;
+        layout(location = 0) out vec4 outColor;
+
+        float encodeSrgb(float x) {
+            x = clamp(x, 0.0, 1.0);
+            return x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 0.4166666667) - 0.055;
+        }
+
+        vec3 fetchMask(ivec2 p) {
+            return texelFetch(uMask, clamp(p, ivec2(0), uMaskSize - ivec2(1)), 0).rgb;
+        }
+
+        // Same half-texel-centred bilinear the CPU bloom uses to upsample its mask.
+        vec3 sampleMask(vec2 coord) {
+            vec2 g = clamp(coord - vec2(0.5), vec2(0.0), vec2(uMaskSize) - 1.0);
+            ivec2 low = ivec2(g);
+            ivec2 high = min(low + ivec2(1), uMaskSize - ivec2(1));
+            vec2 frac = g - vec2(low);
+            vec3 top = mix(fetchMask(low), fetchMask(ivec2(high.x, low.y)), frac.x);
+            vec3 bottom = mix(fetchMask(ivec2(low.x, high.y)), fetchMask(high), frac.x);
+            return mix(top, bottom, frac.y);
+        }
+
+        void main() {
+            ivec2 p = ivec2(gl_FragCoord.xy);
+            vec3 value = texelFetch(uInput, p, 0).rgb;
+            if (uBloomAmount > 0.0) {
+                vec2 coord = (vec2(p) + 0.5) * vec2(uMaskSize) / vec2(uImageSize);
+                value = max(value + sampleMask(coord) * 0.45 * uBloomAmount, 0.0);
+            }
             outColor = vec4(encodeSrgb(value.r), encodeSrgb(value.g), encodeSrgb(value.b), 1.0);
         }
     """
@@ -763,6 +1066,22 @@ data class GpuPipelineConfig(
     val chromaStrength: Float,
     val lumaStrength: Float,
     val sharpenAmount: Float,
+    /** StyleState.strength: scales the pad transforms and the style's own denoise. */
+    val styleStrength: Float = 0f,
+    /** StyleState.saturation, signed [-1, 1]. */
+    val saturation: Float = 0f,
+    /** StyleState.bloom, [0, 1]. */
+    val bloom: Float = 0f,
+    /** StyleEngine.ResolvedStyle, flattened. All zero/identity at neutral pads. */
+    val toneContrast: Float = 0f,
+    val midtoneLift: Float = 0f,
+    val shoulderStrength: Float = 0f,
+    val temperature: Float = 0f,
+    val chromaScale: Float = 1f,
+    val chromaCompression: Float = 0f,
+    val paletteHueShift: Float = 0f,
+    val paletteChromaBoost: Float = 0f,
+    val shadowHueTint: Float = 0f,
 ) {
     override fun equals(other: Any?): Boolean = this === other ||
         other is GpuPipelineConfig && natural == other.natural &&
@@ -774,6 +1093,14 @@ data class GpuPipelineConfig(
         chromaStrength == other.chromaStrength &&
         lumaStrength == other.lumaStrength &&
         sharpenAmount == other.sharpenAmount &&
+        styleStrength == other.styleStrength && saturation == other.saturation &&
+        bloom == other.bloom && toneContrast == other.toneContrast &&
+        midtoneLift == other.midtoneLift && shoulderStrength == other.shoulderStrength &&
+        temperature == other.temperature && chromaScale == other.chromaScale &&
+        chromaCompression == other.chromaCompression &&
+        paletteHueShift == other.paletteHueShift &&
+        paletteChromaBoost == other.paletteChromaBoost &&
+        shadowHueTint == other.shadowHueTint &&
         colorMatrix.contentEquals(other.colorMatrix)
 
     override fun hashCode(): Int = natural.hashCode() * 31 + wbGains.hashCode()
