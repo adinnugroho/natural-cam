@@ -29,24 +29,14 @@ prototype was slow (12.2s vs 1.2s CPU) because it read the full
 12MP RGBA32F frame back to Kotlin. This new architecture keeps everything
 as GPU textures.
 
-## Current status (2026-10-26)
+## Current status (2026-10-26, multi-pass)
 
 - GPU path activates: `gpuPipelineBackend=gpu-native-natural`
-- GPU time: 24.7s (Oppo CPH2737)
+- **Multi-pass GPU time: 6.2s** (Oppo CPH2737)
 - CPU reference: ~13s for same scene
-- **GPU is currently slower than CPU** — single mega-shader with 15+ texture
-  fetches per pixel (demosaic probes + 2x2 denoise + 3x3 sharpen) is too
-  expensive on this Mali GPU.
-
-## Required optimization
-
-Split into multi-pass pipeline:
-1. Pass 1: normalize + demosaic + WB + color matrix → RGBA16F
-2. Pass 2: NATURAL tone + highlight roll-off → RGBA16F
-3. Pass 3: denoise + sharpen → RGBA8
-
-Each pass has fewer texture fetches, better cache utilization, and the GPU
-can overlap passes.
+- **GPU is 2x faster than CPU**
+- Total capture: 17.1s (DNG read 10.8s + fusion 6.9s + GPU 6.2s + style/grain/save)
+- Remaining bottleneck: DNG decode + RAW fusion, not the GPU pipeline
 
 ## Supported contract
 
@@ -57,7 +47,7 @@ can overlap passes.
 
 ## Implementation
 
-- `GpuRawPipeline.kt` — persistent EGL session, single-pass shader
+- `GpuRawPipeline.kt` — persistent EGL session, 3-pass shaders
 - `GpuPipelineConfig` — config data class
 - `ImagePipeline.processRaw` — routes to GPU behind `EXPERIMENTAL_GPU_PIPELINE`
 
@@ -67,4 +57,9 @@ can overlap passes.
 |---|---|---|---|
 | 2026-10-25 | RGBA32F readback between stages | 12.2s | 1.2s |
 | 2026-10-26 | GPU-native single-pass, 8-bit readback only | 24.7s | ~13s |
-| Target | Multi-pass, 8-bit readback only | <3s | ~13s |
+| 2026-10-26 | **Multi-pass, 8-bit readback only** | **6.2s** | **~13s** |
+
+## Remaining bottleneck
+
+DNG decode (10.8s) and RAW fusion (6.9s) now dominate. The GPU pipeline
+itself is fast. Next optimization: memory-mapped DNG decode.

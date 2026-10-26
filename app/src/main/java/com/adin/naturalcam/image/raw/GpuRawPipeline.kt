@@ -9,7 +9,6 @@ import android.opengl.GLES30
 import android.os.SystemClock
 import android.util.Log
 import com.adin.naturalcam.image.core.CfaLayout
-import com.adin.naturalcam.image.core.RawCaptureMetadata
 import com.adin.naturalcam.image.core.RawImage
 import com.adin.naturalcam.image.core.RgbGains
 import java.nio.ByteBuffer
@@ -17,11 +16,16 @@ import java.nio.ByteOrder
 import java.util.concurrent.Executors
 
 /**
- * GPU-native RAW pipeline.
+ * GPU-native RAW pipeline using multi-pass rendering.
  *
- * Uploads the RAW mosaic once, then runs the full processing chain as GPU shaders
- * on ping-pong RGBA16F textures. The only readback is the final 8-bit ARGB frame.
- * No intermediate full-resolution data crosses the GPU/CPU boundary.
+ * Pass 1: normalize + demosaic + WB + color matrix → RGBA16F (expensive, runs once)
+ * Pass 2: NATURAL tone + highlight roll-off + clipped-neutralize → RGBA16F (cheap, per-pixel)
+ * Pass 3: denoise + sharpen + sRGB encode → RGBA8 (cheap, small neighborhood)
+ *
+ * Only the final 8-bit frame crosses the GPU/CPU boundary.
+ * The key optimization over the single-pass shader: denoise/sharpen sample
+ * the already-demosaiced RGBA16F result instead of re-running demosaic
+ * for every neighbor pixel.
  *
  * Supported contract:
  * - RAW sensor input (16-bit CFA mosaic)
@@ -102,13 +106,14 @@ internal object GpuRawPipeline {
         private var surface: EGLSurface = EGL14.EGL_NO_SURFACE
         private var framebuffer = 0
 
-        // Ping-pong float textures for multi-pass processing
-        private var textureA = 0
-        private var textureB = 0
         private var rawTexture = 0
-        private var outputTexture = 0
+        private var textureA = 0   // Pass 1 output: linear RGB after demosaic+WB+matrix
+        private var textureB = 0   // Pass 2 output: tone-mapped
+        private var outputTexture = 0  // Pass 3 output: sRGB RGBA8
 
-        private var rawProgram = 0
+        private var pass1Program = 0
+        private var pass2Program = 0
+        private var pass3Program = 0
 
         init {
             initializeEgl()
@@ -117,9 +122,13 @@ internal object GpuRawPipeline {
 
         fun render(raw: RawImage, config: GpuPipelineConfig): Result {
             uploadRaw(raw)
-            renderRawToLinear(raw, config)
+            runPass1(raw, config)
             if (config.natural) {
-                renderNatural(config)
+                runPass2(config)
+                runPass3(config, textureB)
+            } else {
+                runPass2Pure()
+                runPass3Pure(textureB)
             }
             return readOutput()
         }
@@ -127,7 +136,9 @@ internal object GpuRawPipeline {
         override fun close() {
             if (display == EGL14.EGL_NO_DISPLAY) return
             if (context != EGL14.EGL_NO_CONTEXT) {
-                GLES30.glDeleteProgram(rawProgram)
+                GLES30.glDeleteProgram(pass1Program)
+                GLES30.glDeleteProgram(pass2Program)
+                GLES30.glDeleteProgram(pass3Program)
                 GLES30.glDeleteFramebuffers(1, intArrayOf(framebuffer), 0)
                 GLES30.glDeleteTextures(4, intArrayOf(rawTexture, textureA, textureB, outputTexture), 0)
             }
@@ -183,7 +194,9 @@ internal object GpuRawPipeline {
             textureB = createTexture(GLES30.GL_RGBA16F, width, height)
             outputTexture = createTexture(GLES30.GL_RGBA8, width, height)
 
-            rawProgram = link(FULL_RAW_SHADER)
+            pass1Program = link(PASS1_SHADER)
+            pass2Program = link(PASS2_SHADER)
+            pass3Program = link(PASS3_SHADER)
         }
 
         private fun createTexture(internalFormat: Int, w: Int, h: Int): Int {
@@ -211,31 +224,72 @@ internal object GpuRawPipeline {
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
         }
 
-        private fun renderRawToLinear(raw: RawImage, config: GpuPipelineConfig) {
+        // ---- Pass 1: normalize + demosaic + WB + color matrix ----
+        private fun runPass1(raw: RawImage, config: GpuPipelineConfig) {
             attach(textureA)
-            GLES30.glUseProgram(rawProgram)
-            bindTexture(rawProgram, "uRaw", 0, rawTexture)
-            uniform4f(rawProgram, "uBlack", blackVector(raw))
-            uniform1f(rawProgram, "uWhite", raw.metadata.whiteLevel.toFloat())
-            uniform1i(rawProgram, "uCfa", cfaCode(raw.metadata.cfa))
-            uniform2i(rawProgram, "uImageSize", width, height)
-            uniform3f(rawProgram, "uGains", floatArrayOf(config.wbGains.r, config.wbGains.g, config.wbGains.b))
-            uniformMatrix3(rawProgram, "uMatrix", config.colorMatrix)
-            uniform1i(rawProgram, "uNatural", if (config.natural) 1 else 0)
-            uniform1f(rawProgram, "uWarmth", config.warmth)
-            uniform1f(rawProgram, "uExposureGain", config.exposureGain)
-            uniform1f(rawProgram, "uToneGamma", config.midtoneGamma)
-            uniform1f(rawProgram, "uToneContrast", config.contrast)
-            uniform1f(rawProgram, "uRollStart", config.highlightRollOffStart)
-            uniform1f(rawProgram, "uRollCompression", config.highlightCompression)
-            uniform1f(rawProgram, "uChromaStrength", config.chromaStrength)
-            uniform1f(rawProgram, "uLumaStrength", config.lumaStrength)
-            uniform1f(rawProgram, "uSharpenAmount", config.sharpenAmount)
+            GLES30.glUseProgram(pass1Program)
+            bindTexture(pass1Program, "uRaw", 0, rawTexture)
+            uniform4f(pass1Program, "uBlack", blackVector(raw))
+            uniform1f(pass1Program, "uWhite", raw.metadata.whiteLevel.toFloat())
+            uniform1i(pass1Program, "uCfa", cfaCode(raw.metadata.cfa))
+            uniform2i(pass1Program, "uImageSize", width, height)
+            uniform3f(pass1Program, "uGains", floatArrayOf(config.wbGains.r, config.wbGains.g, config.wbGains.b))
+            uniformMatrix3(pass1Program, "uMatrix", config.colorMatrix)
             drawFullscreen()
         }
 
-        private fun renderNatural(config: GpuPipelineConfig) {
-            // NATURAL base is already applied in rawProgram; nothing extra needed here.
+        // ---- Pass 2: NATURAL tone + highlight roll-off + clipped-neutralize ----
+        private fun runPass2(config: GpuPipelineConfig) {
+            attach(textureB)
+            GLES30.glUseProgram(pass2Program)
+            bindTexture(pass2Program, "uInput", 0, textureA)
+            uniform1f(pass2Program, "uWarmth", config.warmth)
+            uniform1f(pass2Program, "uExposureGain", config.exposureGain)
+            uniform1f(pass2Program, "uToneGamma", config.midtoneGamma)
+            uniform1f(pass2Program, "uToneContrast", config.contrast)
+            uniform1f(pass2Program, "uRollStart", config.highlightRollOffStart)
+            uniform1f(pass2Program, "uRollCompression", config.highlightCompression)
+            drawFullscreen()
+        }
+
+        // ---- Pass 2 PURE: just clipped-neutralize ----
+        private fun runPass2Pure() {
+            attach(textureB)
+            GLES30.glUseProgram(pass2Program)
+            bindTexture(pass2Program, "uInput", 0, textureA)
+            uniform1f(pass2Program, "uWarmth", 0f)
+            uniform1f(pass2Program, "uExposureGain", 1f)
+            uniform1f(pass2Program, "uToneGamma", 1f)
+            uniform1f(pass2Program, "uToneContrast", 0f)
+            uniform1f(pass2Program, "uRollStart", 1f)
+            uniform1f(pass2Program, "uRollCompression", 0f)
+            drawFullscreen()
+        }
+
+        // ---- Pass 3: denoise + sharpen + sRGB encode (NATURAL) ----
+        private fun runPass3(config: GpuPipelineConfig, inputTexture: Int) {
+            attach(outputTexture)
+            GLES30.glUseProgram(pass3Program)
+            bindTexture(pass3Program, "uInput", 0, inputTexture)
+            uniform2i(pass3Program, "uImageSize", width, height)
+            uniform1f(pass3Program, "uChromaStrength", config.chromaStrength)
+            uniform1f(pass3Program, "uLumaStrength", config.lumaStrength)
+            uniform1f(pass3Program, "uSharpenAmount", config.sharpenAmount)
+            uniform1i(pass3Program, "uNatural", 1)
+            drawFullscreen()
+        }
+
+        // ---- Pass 3 PURE: just sRGB encode ----
+        private fun runPass3Pure(inputTexture: Int) {
+            attach(outputTexture)
+            GLES30.glUseProgram(pass3Program)
+            bindTexture(pass3Program, "uInput", 0, inputTexture)
+            uniform2i(pass3Program, "uImageSize", width, height)
+            uniform1f(pass3Program, "uChromaStrength", 0f)
+            uniform1f(pass3Program, "uLumaStrength", 0f)
+            uniform1f(pass3Program, "uSharpenAmount", 0f)
+            uniform1i(pass3Program, "uNatural", 0)
+            drawFullscreen()
         }
 
         private fun readOutput(): Result {
@@ -354,7 +408,8 @@ internal object GpuRawPipeline {
         void main() { gl_Position = vec4(POSITIONS[gl_VertexID], 0.0, 1.0); }
     """
 
-    private const val FULL_RAW_SHADER = """
+    // ---- Pass 1: RAW → demosaic → WB → color matrix (RGBA16F output) ----
+    private const val PASS1_SHADER = """
         #version 300 es
         precision highp float;
         precision highp int;
@@ -367,16 +422,6 @@ internal object GpuRawPipeline {
         uniform ivec2 uImageSize;
         uniform vec3 uGains;
         uniform mat3 uMatrix;
-        uniform int uNatural;
-        uniform float uWarmth;
-        uniform float uExposureGain;
-        uniform float uToneGamma;
-        uniform float uToneContrast;
-        uniform float uRollStart;
-        uniform float uRollCompression;
-        uniform float uChromaStrength;
-        uniform float uLumaStrength;
-        uniform float uSharpenAmount;
         layout(location = 0) out vec4 outColor;
 
         const float MISSING = -1.0;
@@ -472,100 +517,88 @@ internal object GpuRawPipeline {
             return vec3(chromaAtGreen(p, 0), rawSample(p), chromaAtGreen(p, 2));
         }
 
+        void main() {
+            ivec2 p = ivec2(gl_FragCoord.xy);
+            vec3 value = demosaic(p);
+            value *= uGains;
+            value = uMatrix * value;
+            outColor = vec4(value, 1.0);
+        }
+    """
+
+    // ---- Pass 2: NATURAL tone + highlight roll-off + clipped-neutralize ----
+    private const val PASS2_SHADER = """
+        #version 300 es
+        precision highp float;
+        uniform sampler2D uInput;
+        uniform float uWarmth;
+        uniform float uExposureGain;
+        uniform float uToneGamma;
+        uniform float uToneContrast;
+        uniform float uRollStart;
+        uniform float uRollCompression;
+        layout(location = 0) out vec4 outColor;
+
         float luma(vec3 c) { return c.r * 0.2126 + c.g * 0.7152 + c.b * 0.0722; }
 
-        float toneMap(float x) {
-            if (x <= 0.0) return 0.0;
-            float l = x;
+        void main() {
+            ivec2 p = ivec2(gl_FragCoord.xy);
+            vec3 value = texelFetch(uInput, p, 0).rgb;
+
+            // Warmth
+            value *= vec3(1.0 + uWarmth, 1.0, 1.0 - uWarmth);
+            // Exposure
+            value *= uExposureGain;
+
+            // Tone map
+            float l = luma(value);
             if (l > 0.0) {
                 float mapped = l <= 0.18
                     ? 0.18 * pow(max(l / 0.18, 0.0), uToneGamma)
                     : 0.18 * pow(max(l / 0.18, 0.0), 1.0 + uToneContrast);
-                return mapped;
+                value *= mapped / l;
             }
-            return l;
+
+            // Highlight roll-off
+            float mx = max(value.r, max(value.g, value.b));
+            if (mx > uRollStart && uRollStart < 1.0) {
+                float span = 1.0 - uRollStart;
+                float t = clamp((mx - uRollStart) / span, 0.0, 1.0);
+                float exp = 1.0 + uRollCompression * 0.75;
+                float mapped = uRollStart + span * pow(t, exp);
+                value *= mapped / mx;
+            }
+
+            // Clipped highlight neutralization
+            float mn = min(value.r, min(value.g, value.b));
+            float md = value.r + value.g + value.b - mn - max(value.r, max(value.g, value.b));
+            if (mn > 0.6 && md > 0.95) {
+                float amt = clamp((md - 0.95) / 0.25, 0.0, 1.0);
+                float neutral = (value.r + value.g + value.b) / 3.0;
+                value = mix(value, vec3(neutral), amt);
+            }
+
+            outColor = vec4(value, 1.0);
         }
+    """
 
-        vec3 processPixel(ivec2 p) {
-            vec3 value = demosaic(p);
+    // ---- Pass 3: denoise + sharpen + sRGB encode (RGBA8 output) ----
+    private const val PASS3_SHADER = """
+        #version 300 es
+        precision highp float;
+        uniform sampler2D uInput;
+        uniform ivec2 uImageSize;
+        uniform float uChromaStrength;
+        uniform float uLumaStrength;
+        uniform float uSharpenAmount;
+        uniform int uNatural;
+        layout(location = 0) out vec4 outColor;
 
-            // WB + color matrix
-            value *= uGains;
-            value = uMatrix * value;
+        float luma(vec3 c) { return c.r * 0.2126 + c.g * 0.7152 + c.b * 0.0722; }
 
-            if (uNatural == 1) {
-                // Warmth
-                value *= vec3(1.0 + uWarmth, 1.0, 1.0 - uWarmth);
-                // Exposure
-                value *= uExposureGain;
-
-                float l = luma(value);
-                if (l > 0.0) {
-                    float mapped = toneMap(l);
-                    value *= mapped / l;
-                }
-
-                // Highlight roll-off
-                float mx = max(value.r, max(value.g, value.b));
-                if (mx > uRollStart && uRollStart < 1.0) {
-                    float span = 1.0 - uRollStart;
-                    float t = clamp((mx - uRollStart) / span, 0.0, 1.0);
-                    float exp = 1.0 + uRollCompression * 0.75;
-                    float mapped = uRollStart + span * pow(t, exp);
-                    value *= mapped / mx;
-                }
-
-                // Clipped highlight neutralization
-                float mn = min(value.r, min(value.g, value.b));
-                float md = value.r + value.g + value.b - mn - max(value.r, max(value.g, value.b));
-                if (mn > 0.6 && md > 0.95) {
-                    float amt = clamp((md - 0.95) / 0.25, 0.0, 1.0);
-                    float neutral = (value.r + value.g + value.b) / 3.0;
-                    value = mix(value, vec3(neutral), amt);
-                }
-
-                // Denoise (2x2 chroma + luma)
-                if (uChromaStrength > 0.0 || uLumaStrength > 0.0) {
-                    vec3 mean = vec3(0.0);
-                    for (int y = 0; y <= 1; y++) {
-                        for (int x = 0; x <= 1; x++) mean += demosaic(p + ivec2(x, y));
-                    }
-                    mean *= 0.25;
-                    float meanL = luma(mean);
-                    float srcL = luma(value);
-                    vec3 srcC = value - vec3(srcL);
-                    vec3 meanC = mean - vec3(meanL);
-                    float outL = srcL + uLumaStrength * (meanL - srcL);
-                    value = vec3(outL) + srcC + uChromaStrength * (meanC - srcC);
-                }
-
-                // Sharpen
-                if (uSharpenAmount > 0.0) {
-                    float centerL = luma(value);
-                    float blurL = 0.0;
-                    float blurW = 0.0;
-                    for (int y = -1; y <= 1; y++) {
-                        for (int x = -1; x <= 1; x++) {
-                            float w = float((x == 0 ? 2 : 1) * (y == 0 ? 2 : 1));
-                            blurL += luma(demosaic(p + ivec2(x, y))) * w;
-                            blurW += w;
-                        }
-                    }
-                    blurL /= blurW;
-                    value += vec3((centerL - blurL) * uSharpenAmount);
-                }
-            }
-
-            // Clipped highlight neutralization (for PURE too)
-            float mn2 = min(value.r, min(value.g, value.b));
-            float md2 = value.r + value.g + value.b - mn2 - max(value.r, max(value.g, value.b));
-            if (mn2 > 0.6 && md2 > 0.95) {
-                float amt2 = clamp((md2 - 0.95) / 0.25, 0.0, 1.0);
-                float neutral2 = (value.r + value.g + value.b) / 3.0;
-                value = mix(value, vec3(neutral2), amt2);
-            }
-
-            return value;
+        vec3 fetch(ivec2 p) {
+            ivec2 clamped = clamp(p, ivec2(0), uImageSize - ivec2(1));
+            return texelFetch(uInput, clamped, 0).rgb;
         }
 
         float encodeSrgb(float x) {
@@ -575,13 +608,47 @@ internal object GpuRawPipeline {
 
         void main() {
             ivec2 p = ivec2(gl_FragCoord.xy);
-            vec3 value = processPixel(p);
-            outColor = vec4(
-                encodeSrgb(value.r),
-                encodeSrgb(value.g),
-                encodeSrgb(value.b),
-                1.0
-            );
+            vec3 value = fetch(p);
+
+            if (uNatural == 1) {
+                // Denoise: 2x2 chroma + luma (samples RGBA16F result, NOT raw)
+                if (uChromaStrength > 0.0 || uLumaStrength > 0.0) {
+                    vec3 mean = (fetch(p) + fetch(p + ivec2(1, 0)) + fetch(p + ivec2(0, 1)) + fetch(p + ivec2(1, 1))) * 0.25;
+                    float meanL = luma(mean);
+                    float srcL = luma(value);
+                    vec3 srcC = value - vec3(srcL);
+                    vec3 meanC = mean - vec3(meanL);
+                    float outL = srcL + uLumaStrength * (meanL - srcL);
+                    value = vec3(outL) + srcC + uChromaStrength * (meanC - srcC);
+                }
+
+                // Sharpen: 3x3 binomial (samples RGBA16F result, NOT raw)
+                if (uSharpenAmount > 0.0) {
+                    float centerL = luma(value);
+                    float blurL = 0.0;
+                    float blurW = 0.0;
+                    for (int y = -1; y <= 1; y++) {
+                        for (int x = -1; x <= 1; x++) {
+                            float w = float((x == 0 ? 2 : 1) * (y == 0 ? 2 : 1));
+                            blurL += luma(fetch(p + ivec2(x, y))) * w;
+                            blurW += w;
+                        }
+                    }
+                    blurL /= blurW;
+                    value += vec3((centerL - blurL) * uSharpenAmount);
+                }
+            }
+
+            // Clipped highlight neutralization
+            float mn = min(value.r, min(value.g, value.b));
+            float md = value.r + value.g + value.b - mn - max(value.r, max(value.g, value.b));
+            if (mn > 0.6 && md > 0.95) {
+                float amt = clamp((md - 0.95) / 0.25, 0.0, 1.0);
+                float neutral = (value.r + value.g + value.b) / 3.0;
+                value = mix(value, vec3(neutral), amt);
+            }
+
+            outColor = vec4(encodeSrgb(value.r), encodeSrgb(value.g), encodeSrgb(value.b), 1.0);
         }
     """
 }
