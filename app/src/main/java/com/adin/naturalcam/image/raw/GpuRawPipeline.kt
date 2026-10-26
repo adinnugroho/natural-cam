@@ -234,9 +234,16 @@ internal object GpuRawPipeline {
             uniform1i(pass1Program, "uCfa", cfaCode(raw.metadata.cfa))
             uniform2i(pass1Program, "uImageSize", width, height)
             uniform3f(pass1Program, "uGains", floatArrayOf(config.wbGains.r, config.wbGains.g, config.wbGains.b))
-            uniformMatrix3(pass1Program, "uMatrix", config.colorMatrix)
+            // GLSL mat3 is column-major; CPU matrix is row-major. Transpose before upload.
+            uniformMatrix3(pass1Program, "uMatrix", transposeMatrix3(config.colorMatrix))
             drawFullscreen()
         }
+
+        private fun transposeMatrix3(m: FloatArray): FloatArray = floatArrayOf(
+            m[0], m[3], m[6],
+            m[1], m[4], m[7],
+            m[2], m[5], m[8],
+        )
 
         // ---- Pass 2: NATURAL tone + highlight roll-off + clipped-neutralize ----
         private fun runPass2(config: GpuPipelineConfig) {
