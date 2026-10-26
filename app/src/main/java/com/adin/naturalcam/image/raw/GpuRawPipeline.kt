@@ -36,6 +36,7 @@ import java.util.concurrent.Executors
 internal object GpuRawPipeline {
     private const val TAG = "GpuRawPipeline"
     private const val READBACK_ROWS = 64
+    private const val REDUCTION_SIZE = 32
 
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "gpu-raw-pipeline")
@@ -110,10 +111,12 @@ internal object GpuRawPipeline {
         private var textureA = 0   // Pass 1 output: linear RGB after demosaic+WB+matrix
         private var textureB = 0   // Pass 2 output: tone-mapped
         private var outputTexture = 0  // Pass 3 output: sRGB RGBA8
+        private var reductionTexture = 0  // 32x32 residual WB reduction
 
         private var pass1Program = 0
         private var pass2Program = 0
         private var pass3Program = 0
+        private var reductionProgram = 0
 
         init {
             initializeEgl()
@@ -123,11 +126,13 @@ internal object GpuRawPipeline {
         fun render(raw: RawImage, config: GpuPipelineConfig): Result {
             uploadRaw(raw)
             runPass1(raw, config)
+            // Residual auto-WB: gray-world correction on Pass 1 output, same as CPU pipeline.
+            val residualGains = computeResidualWb()
             if (config.natural) {
-                runPass2(config)
+                runPass2(config, residualGains)
                 runPass3(config, textureB)
             } else {
-                runPass2Pure()
+                runPass2Pure(residualGains)
                 runPass3Pure(textureB)
             }
             return readOutput()
@@ -139,8 +144,9 @@ internal object GpuRawPipeline {
                 GLES30.glDeleteProgram(pass1Program)
                 GLES30.glDeleteProgram(pass2Program)
                 GLES30.glDeleteProgram(pass3Program)
+                GLES30.glDeleteProgram(reductionProgram)
                 GLES30.glDeleteFramebuffers(1, intArrayOf(framebuffer), 0)
-                GLES30.glDeleteTextures(4, intArrayOf(rawTexture, textureA, textureB, outputTexture), 0)
+                GLES30.glDeleteTextures(5, intArrayOf(rawTexture, textureA, textureB, outputTexture, reductionTexture), 0)
             }
             EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
             if (surface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, surface)
@@ -193,10 +199,17 @@ internal object GpuRawPipeline {
             textureA = createTexture(GLES30.GL_RGBA16F, width, height)
             textureB = createTexture(GLES30.GL_RGBA16F, width, height)
             outputTexture = createTexture(GLES30.GL_RGBA8, width, height)
+            reductionTexture = createTexture(GLES30.GL_RGBA32F, REDUCTION_SIZE, REDUCTION_SIZE)
 
             pass1Program = link(PASS1_SHADER)
             pass2Program = link(PASS2_SHADER)
             pass3Program = link(PASS3_SHADER)
+            reductionProgram = link(REDUCTION_SHADER)
+        }
+
+        private fun checkGl(stage: String) {
+            val err = GLES30.glGetError()
+            if (err != GLES30.GL_NO_ERROR) throw RuntimeException("$stage GL error 0x${Integer.toHexString(err)}")
         }
 
         private fun createTexture(internalFormat: Int, w: Int, h: Int): Int {
@@ -239,17 +252,57 @@ internal object GpuRawPipeline {
             drawFullscreen()
         }
 
+        // ---- Residual auto-WB: reduce textureA to small grid, read back, compute gains ----
+        private fun computeResidualWb(): FloatArray {
+            // Reduction grid: 32x32 cells, each covering ~width/32 × height/32 pixels
+            attach(reductionTexture, REDUCTION_SIZE, REDUCTION_SIZE)
+            GLES30.glUseProgram(reductionProgram)
+            bindTexture(reductionProgram, "uInput", 0, textureA)
+            uniform2i(reductionProgram, "uInputSize", width, height)
+            uniform2i(reductionProgram, "uReductionSize", REDUCTION_SIZE, REDUCTION_SIZE)
+            drawFullscreen()
+
+            val bytes = ByteBuffer
+                .allocateDirect(REDUCTION_SIZE * REDUCTION_SIZE * 4 * 4)
+                .order(ByteOrder.nativeOrder())
+            GLES30.glReadPixels(0, 0, REDUCTION_SIZE, REDUCTION_SIZE, GLES30.GL_RGBA, GLES30.GL_FLOAT, bytes)
+            checkGl("reduction readback")
+            val values = bytes.asFloatBuffer()
+
+            // Compute auto-WB gains from reduction sums (same logic as WhiteBalanceStage.auto)
+            var sumR = 0f; var sumG = 0f; var sumB = 0f; var count = 0f
+            for (i in 0 until REDUCTION_SIZE * REDUCTION_SIZE) {
+                val offset = i * 4
+                val r = values.get(offset)
+                val g = values.get(offset + 1)
+                val b = values.get(offset + 2)
+                val n = values.get(offset + 3)
+                if (n <= 0f) continue
+                sumR += r; sumG += g; sumB += b; count += n
+            }
+            if (count < 32f) return floatArrayOf(1f, 1f, 1f)
+            val meanR = sumR / count
+            val meanG = sumG / count
+            val meanB = sumB / count
+            return floatArrayOf(
+                (meanG / meanR).coerceIn(0.5f, 2f),
+                1f,
+                (meanG / meanB).coerceIn(0.5f, 2f),
+            )
+        }
+
         private fun transposeMatrix3(m: FloatArray): FloatArray = floatArrayOf(
             m[0], m[3], m[6],
             m[1], m[4], m[7],
             m[2], m[5], m[8],
         )
 
-        // ---- Pass 2: NATURAL tone + highlight roll-off + clipped-neutralize ----
-        private fun runPass2(config: GpuPipelineConfig) {
+        // ---- Pass 2: residual WB + NATURAL tone + highlight roll-off + clipped-neutralize ----
+        private fun runPass2(config: GpuPipelineConfig, residualGains: FloatArray) {
             attach(textureB)
             GLES30.glUseProgram(pass2Program)
             bindTexture(pass2Program, "uInput", 0, textureA)
+            uniform3f(pass2Program, "uResidualGains", residualGains)
             uniform1f(pass2Program, "uWarmth", config.warmth)
             uniform1f(pass2Program, "uExposureGain", config.exposureGain)
             uniform1f(pass2Program, "uToneGamma", config.midtoneGamma)
@@ -259,11 +312,12 @@ internal object GpuRawPipeline {
             drawFullscreen()
         }
 
-        // ---- Pass 2 PURE: just clipped-neutralize ----
-        private fun runPass2Pure() {
+        // ---- Pass 2 PURE: residual WB + clipped-neutralize ----
+        private fun runPass2Pure(residualGains: FloatArray) {
             attach(textureB)
             GLES30.glUseProgram(pass2Program)
             bindTexture(pass2Program, "uInput", 0, textureA)
+            uniform3f(pass2Program, "uResidualGains", residualGains)
             uniform1f(pass2Program, "uWarmth", 0f)
             uniform1f(pass2Program, "uExposureGain", 1f)
             uniform1f(pass2Program, "uToneGamma", 1f)
@@ -325,13 +379,13 @@ internal object GpuRawPipeline {
             return Result(argb, width, height)
         }
 
-        private fun attach(texture: Int) {
+        private fun attach(texture: Int, w: Int = width, h: Int = height) {
             GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, framebuffer)
             GLES30.glFramebufferTexture2D(
                 GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0,
                 GLES30.GL_TEXTURE_2D, texture, 0,
             )
-            GLES30.glViewport(0, 0, width, height)
+            GLES30.glViewport(0, 0, w, h)
             check(GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) == GLES30.GL_FRAMEBUFFER_COMPLETE) {
                 "Framebuffer incomplete for texture=$texture"
             }
@@ -533,11 +587,44 @@ internal object GpuRawPipeline {
         }
     """
 
+    // ---- Residual auto-WB reduction: sums bright low-chroma samples per cell ----
+    private const val REDUCTION_SHADER = """
+        #version 300 es
+        precision highp float;
+        uniform sampler2D uInput;
+        uniform ivec2 uInputSize;
+        uniform ivec2 uReductionSize;
+        layout(location = 0) out vec4 outColor;
+
+        void main() {
+            ivec2 cell = ivec2(gl_FragCoord.xy);
+            ivec2 blockStart = cell * uInputSize / uReductionSize;
+            ivec2 blockEnd = (cell + 1) * uInputSize / uReductionSize;
+            vec3 sum = vec3(0.0);
+            float count = 0.0;
+            for (int y = blockStart.y; y < blockEnd.y; y++) {
+                for (int x = blockStart.x; x < blockEnd.x; x++) {
+                    vec3 v = texelFetch(uInput, ivec2(x, y), 0).rgb;
+                    // Same selection as CPU WhiteBalanceStage.auto:
+                    // bright, low-chroma samples only
+                    float lum = (v.r + v.g + v.b) / 3.0;
+                    float chroma = max(v.r, max(v.g, v.b)) - min(v.r, min(v.g, v.b));
+                    if (lum >= 0.35 && lum <= 0.98 && chroma <= max(0.03, lum * 0.25)) {
+                        sum += v;
+                        count += 1.0;
+                    }
+                }
+            }
+            outColor = vec4(sum, count);
+        }
+    """
+
     // ---- Pass 2: NATURAL tone + highlight roll-off + clipped-neutralize ----
     private const val PASS2_SHADER = """
         #version 300 es
         precision highp float;
         uniform sampler2D uInput;
+        uniform vec3 uResidualGains;
         uniform float uWarmth;
         uniform float uExposureGain;
         uniform float uToneGamma;
@@ -552,6 +639,8 @@ internal object GpuRawPipeline {
             ivec2 p = ivec2(gl_FragCoord.xy);
             vec3 value = texelFetch(uInput, p, 0).rgb;
 
+            // Residual gray-world WB (matches CPU WhiteBalanceStage.auto)
+            value *= uResidualGains;
             // Warmth
             value *= vec3(1.0 + uWarmth, 1.0, 1.0 - uWarmth);
             // Exposure

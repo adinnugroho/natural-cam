@@ -455,20 +455,19 @@ class CameraXController(
         val requestedFrames = plan.rawFrameCount.coerceIn(1, 3)
         return try {
             if (requestedFrames > 1) {
-                // Keep CameraX bound so the preview surface remains live during a burst.
-                // Camera2 is the compatibility fallback for devices whose CameraX RAW
-                // burst cannot satisfy the request.
+                // Camera2 first: returns in-memory raw images, skipping the 10.8s DNG
+                // disk round-trip. CameraX rebinds preview after capture.
                 try {
-                    captureRawFrames(request, requestedFrames, plan.rawFrameStrategy)
+                    captureRawCamera2(request, plan)
                 } catch (e: CancellationException) {
                     throw e
-                } catch (cameraXError: Exception) {
+                } catch (camera2Error: Exception) {
                     Log.w(
                         TAG,
-                        "capture ${request.captureId.value} CameraX RAW burst failed; retrying Camera2",
-                        cameraXError,
+                        "capture ${request.captureId.value} Camera2 RAW burst failed; falling back to CameraX",
+                        camera2Error,
                     )
-                    captureRawCamera2(request, plan)
+                    captureRawFrames(request, requestedFrames, plan.rawFrameStrategy)
                 }
             } else {
                 captureRawFrames(request, requestedFrames, plan.rawFrameStrategy)
